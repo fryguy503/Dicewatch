@@ -1,0 +1,107 @@
+name: Build Dicewatch
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HAILSTONE_SDK_REVISION: 3ddd5c61c89429efedc9c8b2a4c3cc404b731834
+
+jobs:
+  native:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: windows-x64
+            configure: -A x64
+          - os: ubuntu-22.04
+            platform: linux-x64
+            configure: ''
+          - os: macos-15
+            platform: macos-arm64
+            configure: -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Configure
+        shell: bash
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.configure }}
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Stage the add-on
+        run: cmake --install build --config Release --prefix stage
+      - name: Check Linux architecture and dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          file stage/dicewatch/dicewatch.so | grep 'ELF 64-bit.*x86-64'
+          dependencies=$(ldd stage/dicewatch/dicewatch.so)
+          printf '%s\n' "$dependencies"
+          if grep -q 'not found' <<< "$dependencies"; then exit 1; fi
+      - name: Check and ad-hoc sign the macOS library
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          library=stage/dicewatch/dicewatch.dylib
+          test "$(lipo -archs "$library")" = arm64
+          codesign --force --sign - --timestamp=none "$library"
+          codesign --verify --strict "$library"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dicewatch-stage-${{ matrix.platform }}
+          path: stage/dicewatch/
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    name: Package add-on
+    runs-on: ubuntu-24.04
+    needs: native
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: projecthailstone/hailstone-client
+          ref: ${{ env.HAILSTONE_SDK_REVISION }}
+          path: sdk-source
+          persist-credentials: false
+          sparse-checkout: tools/make_addon.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dicewatch-stage-*
+          path: platforms
+      - name: Generate manager packages and manifest
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^project\(dicewatch VERSION ([0-9.]+) LANGUAGES CXX\)$/\1/p' CMakeLists.txt)
+          test -n "$version"
+          python3 sdk-source/tools/make_addon.py \
+            --name dicewatch --kind plugin --version "$version" --min-client 0.7.2-beta \
+            --author Fryguy --description 'Track named loot rolls in multiple ranges with independent timers.' \
+            --caps read,commands,ui,packets \
+            --platform windows-x64=platforms/dicewatch-stage-windows-x64 \
+            --platform linux-x64=platforms/dicewatch-stage-linux-x64 \
+            --platform macos-arm64=platforms/dicewatch-stage-macos-arm64 \
+            --out release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dicewatch-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
