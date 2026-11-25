@@ -265,27 +265,48 @@ local function title_bar(plugin, state, scale, compact)
   ui.Separator()
 end
 
-local function round_card(plugin, round, selected, width, height, scale)
+local function round_card(round, id, selected, width, height, scale, detail, tooltip_detail)
   local x, y = ui.GetCursorScreenPos()
   local pressed
-  if selected then pressed = styled_button("##round" .. round.id, width, height, selected_colors)
-  else pressed = ui.Button("##round" .. round.id, width, height) end
-  if pressed and not selected then act(plugin, "select", round.id) end
+  if selected then pressed = styled_button(id, width, height, selected_colors)
+  else pressed = ui.Button(id, width, height) end
   local inset = 7 * scale
   local _, line = ui.CalcTextSize("Ag")
-  local detail
-  if round.closed then
-    detail = round.status
-  elseif round.remaining >= 0 then
-    detail = time_text(round.remaining)
-    if ui.CalcTextSize(detail .. " left") <= width - 2 * inset then detail = detail .. " left" end
-  else
-    detail = string.format("%d %s", round.total, round.total == 1 and "roll" or "rolls")
+  if not detail then
+    if round.closed then
+      detail = round.status
+    elseif round.remaining >= 0 then
+      detail = time_text(round.remaining)
+      if ui.CalcTextSize(detail .. " left") <= width - 2 * inset then detail = detail .. " left" end
+    else
+      detail = string.format("%d %s", round.total, round.total == 1 and "roll" or "rolls")
+    end
   end
   clipped_text(x + inset, y + 5 * scale, width - 2 * inset, line, selected and accent or ink, range_text(round))
   clipped_text(x + inset, y + line + 7 * scale, width - 2 * inset, line, ink, round.label)
   clipped_text(x + inset, y + 2 * line + 8 * scale, width - 2 * inset, line, muted, detail)
-  if ui.IsItemHovered() then ui.SetTooltip(round.label .. " · " .. range_text(round) .. " · " .. detail) end
+  if ui.IsItemHovered() then
+    local tooltip = round.label .. " · " .. range_text(round) .. " · " .. (tooltip_detail or detail)
+    if round.date and round.date ~= "" then tooltip = tooltip .. " · " .. round.date end
+    ui.SetTooltip(tooltip)
+  end
+  return pressed
+end
+
+local function card_layout(available, scale)
+  local columns = available >= 416 * scale and 4 or available >= 208 * scale and 2 or 1
+  local _, line = ui.CalcTextSize("Ag")
+  return { columns = columns, height = 3 * line + 13 * scale, gap = 6 * scale, scale = scale }
+end
+
+local function card_grid(rounds, layout, first, last, draw)
+  local available = ui.GetContentRegionAvail()
+  local width = #rounds == 1 and math.min(available, 228 * layout.scale)
+    or (available - (layout.columns - 1) * layout.gap) / layout.columns
+  for index = first, last do
+    if (index - first) % layout.columns ~= 0 then ui.SameLine(0, layout.gap) end
+    draw(rounds[index], width, layout.height)
+  end
 end
 
 local function round_cards(plugin, state, scale)
@@ -305,19 +326,15 @@ local function round_cards(plugin, state, scale)
     return
   end
 
-  local columns = available >= 416 * scale and 4 or available >= 208 * scale and 2 or 1
-  local gap = 6 * scale
-  local _, line = ui.CalcTextSize("Ag")
-  local height = 3 * line + 13 * scale
-  local scrolling = #rounds > columns * 2
-  if scrolling then ui.BeginChild("##round-cards", 0, 2 * height + 6 * scale, false) end
-  local content_width = ui.GetContentRegionAvail()
-  local width = #rounds == 1 and math.min(content_width, 228 * scale)
-    or (content_width - (columns - 1) * gap) / columns
-  for index, round in ipairs(rounds) do
-    if (index - 1) % columns ~= 0 then ui.SameLine(0, gap) end
-    round_card(plugin, round, round.id == state.selected, width, height, scale)
-  end
+  local layout = card_layout(available, scale)
+  local scrolling = #rounds > layout.columns * 2
+  if scrolling then ui.BeginChild("##round-cards", 0, 2 * layout.height + layout.gap, false) end
+  card_grid(rounds, layout, 1, #rounds, function(round, width, height)
+    local selected = round.id == state.selected
+    if round_card(round, "##round" .. round.id, selected, width, height, scale) and not selected then
+      act(plugin, "select", round.id)
+    end
+  end)
   if scrolling then ui.EndChild() end
 end
 
@@ -761,31 +778,47 @@ local function session_exists(options, key)
   return false
 end
 
-local function record_picker(data)
-  local entries, chosen = {}, nil
+local function record_cards(data, scale)
+  local entries, selected_index = {}, 1
   for _, entry in ipairs(data.entries or {}) do
     if ledger.filter == "" or entry.session == ledger.filter then
       entries[#entries + 1] = entry
-      if entry.key == ledger.key then chosen = entry end
+      if entry.key == ledger.key then selected_index = #entries end
     end
   end
-  chosen = chosen or entries[1]
-  if not chosen then
+  if #entries == 0 then
     ui.TextDisabled("No completed rounds for this selection.")
     return nil
   end
 
-  ui.SetNextItemWidth(-1)
-  local preview = range_text(chosen) .. " · " .. chosen.label
-  if ui.BeginCombo("##ledger-record", preview) then
-    for _, entry in ipairs(entries) do
-      local name = entry.label:gsub("#", "＃")
-      local date = entry.date and entry.date ~= "" and (entry.date .. " · ") or ""
-      local selected = entry.key == chosen.key
-      local label = date .. range_text(entry) .. " · " .. name .. "##record" .. entry.key
-      if ui.Selectable(label, selected) then chosen = entry end
+  local layout = card_layout(ui.GetContentRegionAvail(), scale)
+  local per_page = layout.columns * 2
+  local page = (selected_index - 1) // per_page + 1
+  local page_count = math.ceil(#entries / per_page)
+  local first = (page - 1) * per_page + 1
+  local chosen = entries[selected_index]
+  local selected_key = chosen.key
+  card_grid(entries, layout, first, math.min(first + per_page - 1, #entries), function(entry, width, height)
+    local recipient = entry.recipient or ""
+    local award = recipient ~= "" and ("Awarded to " .. recipient) or "Unawarded"
+    local detail = award
+    if entry.date and entry.date ~= "" then
+      local date = entry.date:match("^%d%d%d%d%-(%d%d%-%d%d %d%d:%d%d)$") or entry.date
+      local full = date .. " · " .. award
+      detail = ui.CalcTextSize(full) <= width - 14 * scale and full or date
     end
-    ui.EndCombo()
+    if round_card(entry, "##ledger-round-" .. entry.key, entry.key == selected_key, width, height, scale, detail, award) then
+      chosen = entry
+    end
+  end)
+  if page_count > 1 then
+    local previous = action_button("Prev##ledger-rounds-page", page > 1)
+    ui.SameLine()
+    ui.TextDisabled(string.format("Page %d of %d", page, page_count))
+    ui.SameLine()
+    local next_page = action_button("Next##ledger-rounds-page", page < page_count)
+    if previous then chosen = entries[first - per_page] end
+    if next_page then chosen = entries[first + per_page] end
   end
   return chosen
 end
@@ -840,7 +873,7 @@ local function ledger_panel(plugin, state, scale)
     return
   end
 
-  local chosen = record_picker(data)
+  local chosen = record_cards(data, scale)
   if not chosen then return end
   if chosen.key ~= ledger.key then
     ledger.key, ledger.refresh_at = chosen.key, 0

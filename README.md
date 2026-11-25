@@ -4,7 +4,7 @@ Dicewatch is a Hailstone add-on for tracking loot rolls on EQEmu servers that us
 
 ## Install
 
-Use **Add-ons** on Hailstone's login screen to install `fryguy503/Dicewatch`. Dicewatch requires Hailstone 0.7.2-beta or later and ships for Windows x64, Linux x64, and macOS arm64. Open it from the in-game Plugins menu or with `/dicewatch`.
+Use **Add-ons** on Hailstone's login screen to install `fryguy503/Dicewatch`. Dicewatch requires Hailstone 0.7.2-beta or later and ships for Windows x64, Linux x64, and macOS arm64. Open it with `/dice` or `/dicewatch`, or from the in-game Plugins menu.
 
 Servers that enforce an add-on allowlist must permit Dicewatch. Hailstone's normal native add-on approval applies.
 
@@ -28,6 +28,8 @@ Dicewatch opens one round per exact pair of bounds. A 0â€“1000 round and a 200â€
 
 ## Loot Ledger
 
+Select a round card in **Ledger** to see its results and award. Use the session filter and page controls to find older rounds.
+
 Right-click a player in the standings or roll log of an ended round and choose **Award** to record them as the recipient. This works in the tracker and in **Ledger**. To enter a different recipient by name or clear an award, open the round in **Ledger** and use **Save** or **Clear**. The ledger displays the award alongside the original roll result.
 
 Choose **Discord summary**, select a play session, and copy the text from the report using your usual Select All and Copy shortcuts. Paste each page into Discord in order. The summary identifies the roll winner or tie, the recorded recipient, and items still awaiting an award.
@@ -46,7 +48,7 @@ Round announcements include the item or label, exact `/random` command, winning 
 
 ## Permissions and data
 
-Dicewatch needs `read` to identify the active character, `commands` to register `/dicewatch` and `/itemroll`, and `ui` for the panel. The `packets` capability lets it observe the server's roll replies. It reads only the inbound zone roll reply for RoF2, validates the payload, and leaves it intact. Chat messages cannot put a roll on the board. Dicewatch stores finished round data and award names locally in the character's Dicewatch configuration directory. The Discord summary is plain text that you can copy and share.
+Dicewatch needs `read` to identify the active character, `commands` to register `/dicewatch`, `/dice`, and `/itemroll`, and `ui` for the panel. The `packets` capability lets it observe the server's roll replies. It reads only the inbound zone roll reply for RoF2, validates the payload, and leaves it intact. Chat messages cannot put a roll on the board. Dicewatch stores finished round data and award names locally in the character's Dicewatch configuration directory. The Discord summary is plain text that you can copy and share.
 
 The `chat` capability is used for Auto-send. If the selected destination is unavailable or chat permission is restricted, the announcement remains available to copy from Dicewatch.
 

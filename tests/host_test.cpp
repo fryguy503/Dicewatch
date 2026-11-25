@@ -125,6 +125,7 @@ public:
     bool in_zone = true;
     bool in_raid = false;
     bool in_group = false;
+    bool dice_command_reserved = false;
     std::uint32_t guild_id = std::numeric_limits<std::uint32_t>::max();
     std::string character = "Trust";
     std::vector<std::string> chat;
@@ -164,7 +165,9 @@ public:
         };
 
         api_.add_command = [](void* opaque, const char* name, HailstoneCommandFn fn, void* context) {
-            return self(opaque).commands_.emplace(name, std::make_pair(fn, context)).second ? 1 : 0;
+            auto& fixture = self(opaque);
+            if (fixture.dice_command_reserved && std::string_view(name) == "/dice") return 0;
+            return fixture.commands_.emplace(name, std::make_pair(fn, context)).second ? 1 : 0;
         };
         api_.remove_command = [](void* opaque, const char* name) { self(opaque).commands_.erase(name); };
         api_.add_ui_function = [](void* opaque, const char* name, HailstoneUiFn fn, void* context) {
@@ -215,6 +218,7 @@ public:
         hailstone_plugin_set_host(&api_);
         InitializePlugin();
         CHECK(commands_.count("/itemroll") == 1 && commands_.count("/dicewatch") == 1);
+        CHECK(commands_.count("/dice") == (dice_command_reserved ? 0u : 1u));
         CHECK(functions_.count("state") == 1 && functions_.count("action") == 1);
         CHECK(functions_.count("ledger") == 1 && functions_.count("raid_summary") == 1);
     }
@@ -295,6 +299,10 @@ void commands_roll_packets_and_ui() {
     FakeHost fake(profile.directory);
     fake.initialize();
     CHECK(!fake.model().boolean("open"));
+    fake.command("/dice");
+    CHECK(fake.model().boolean("open"));
+    fake.command("/dice", "hide");
+    CHECK(!fake.model().boolean("open"));
 
     fake.command("/itemroll", "1000 Trust's armor");
     auto state = fake.model();
@@ -361,6 +369,16 @@ void commands_roll_packets_and_ui() {
     CHECK(fake.model().at("history").items.at(0).string("summary").find("921") != std::string::npos);
     fake.action({std::string("select"), second});
     CHECK(!fake.model().at("current").boolean("closed"));
+    fake.shutdown();
+}
+
+void reserved_dice_command() {
+    TestProfile profile;
+    FakeHost fake(profile.directory);
+    fake.dice_command_reserved = true;
+    fake.initialize();
+    fake.command("/dicewatch");
+    CHECK(fake.model().boolean("open") && fake.model().boolean("ready"));
     fake.shutdown();
 }
 
@@ -629,6 +647,7 @@ void linked_announcement_delivery() {
 int main() {
     try {
         commands_roll_packets_and_ui();
+        reserved_dice_command();
         zone_and_capability_changes();
         preferences();
         loot_ledger_survives_relog();

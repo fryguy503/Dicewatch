@@ -79,6 +79,7 @@ struct Runtime {
 Runtime state;
 bool roll_command_registered = false;
 bool panel_command_registered = false;
+bool dice_command_registered = false;
 bool model_registered = false;
 bool action_registered = false;
 bool ledger_registered = false;
@@ -928,6 +929,8 @@ void unregister() {
     if (model_registered) host->remove_ui_function(host->host, "state");
     if (roll_command_registered) host->remove_command(host->host, "/itemroll");
     if (panel_command_registered) host->remove_command(host->host, "/dicewatch");
+    if (dice_command_registered) host->remove_command(host->host, "/dice");
+    dice_command_registered = false;
     report_registered = ledger_registered = action_registered = model_registered = roll_command_registered = panel_command_registered = false;
 }
 
@@ -957,6 +960,7 @@ HAILSTONE_API void InitializePlugin() noexcept {
             if (HAILSTONE_HOST_HAS(host, log)) host->log(host->host, 2, "Dicewatch commands or UI were unavailable.");
             return;
         }
+        dice_command_registered = host->add_command(host->host, "/dice", show_command, nullptr) != 0;
         state.initialized = true;
         if (HAILSTONE_HOST_HAS(host, add_menu)) host->add_menu(host->host, "Dicewatch", "/dicewatch");
         refresh_character();
