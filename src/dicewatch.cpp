@@ -293,6 +293,7 @@ void emit_round(Output& output, const Round& round, Time now, bool detail, bool 
     output.string("label", round.spec.label);
     output.integer("low", round.spec.range.low);
     output.integer("high", round.spec.range.high);
+    output.string("order", order_name(round.settings.order));
     output.boolean("closed", !round.open());
     output.string("status", status(round));
     output.integer("total", static_cast<std::int64_t>(round.rolls.size()));

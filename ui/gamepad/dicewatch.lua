@@ -30,13 +30,80 @@ local function wrap_tint(color, text)
   ui.PopTextWrapPos()
 end
 
-local accent = { 0.95, 0.79, 0.48 }
-local good = { 0.62, 0.87, 0.68 }
-local warning = { 0.98, 0.62, 0.55 }
+local function rgb(hex)
+  return { (hex >> 16 & 255) / 255, (hex >> 8 & 255) / 255, (hex & 255) / 255 }
+end
 
-local function action_button(label, enabled)
+local background, title, control = rgb(0x1e1e23), rgb(0x27262d), rgb(0x2a2930)
+local border, rule, hover = rgb(0x46424b), rgb(0x35333b), rgb(0x37353d)
+local ink, muted, accent = rgb(0xf0ece6), rgb(0xb2a8b4), rgb(0xf3ce81)
+local emphasis, amber, dark_ink = rgb(0x362e22), rgb(0xebc982), rgb(0x2c210f)
+local good, warning = rgb(0xa1d9b2), rgb(0xf4a596)
+local halo, amber_hover = rgb(0x493d2a), rgb(0xf5d899)
+local col = ui.Col
+
+local function color_list(entries)
+  local list = {}
+  for id, color in pairs(entries) do
+    list[#list + 1] = id
+    list[#list + 1] = color[1]
+    list[#list + 1] = color[2]
+    list[#list + 1] = color[3]
+    list[#list + 1] = color[4] or 1
+  end
+  return list
+end
+
+local window_colors = color_list({
+  [col.WindowBg] = background, [col.ChildBg] = background, [col.PopupBg] = title,
+  [col.Text] = ink, [col.TextDisabled] = muted, [col.Border] = border, [col.Separator] = rule,
+  [col.FrameBg] = control, [col.FrameBgHovered] = hover, [col.FrameBgActive] = emphasis,
+  [col.Button] = control, [col.ButtonHovered] = hover, [col.ButtonActive] = emphasis,
+  [col.Header] = emphasis, [col.HeaderHovered] = hover, [col.HeaderActive] = halo,
+  [col.NavCursor] = accent,
+})
+local selected_colors = color_list({
+  [col.Text] = accent, [col.Button] = emphasis, [col.ButtonHovered] = halo,
+  [col.ButtonActive] = halo, [col.Border] = accent,
+})
+local primary_colors = color_list({
+  [col.Text] = dark_ink, [col.Button] = amber, [col.ButtonHovered] = amber_hover,
+  [col.ButtonActive] = accent, [col.Border] = amber,
+})
+local flat_colors = color_list({ [col.Button] = {0, 0, 0, 0}, [col.Border] = {0, 0, 0, 0} })
+
+local function rectangle(x, y, width, height, shade, radius)
+  ui.DrawRectFilled(x, y, x + width, y + height, shade[1], shade[2], shade[3], 1, radius or 0)
+end
+
+local function draw_text(x, y, shade, text)
+  ui.DrawText(x, y, shade[1], shade[2], shade[3], 1, text)
+end
+
+local function clipped_text(x, y, width, line, shade, text)
+  if width <= 0 then return end
+  local dots = ui.CalcTextSize("…")
+  if ui.CalcTextSize(text) <= width then
+    draw_text(x, y, shade, text)
+  elseif width > dots + 3 then
+    ui.PushClipRect(x, y, x + width - dots, y + line, true)
+    draw_text(x, y, shade, text)
+    ui.PopClipRect()
+    draw_text(x + width - dots, y, shade, "…")
+  end
+end
+
+local function styled_button(label, width, height, colors)
+  local count = ui.PushStyleColors(colors)
+  local clicked = ui.Button(label, width, height)
+  ui.PopStyleColor(count)
+  return clicked
+end
+
+local function action_button(label, enabled, colors)
   if not enabled then ui.BeginDisabled() end
-  local pressed = ui.Button(label)
+  local pressed
+  if colors then pressed = styled_button(label, 0, 0, colors) else pressed = ui.Button(label) end
   if not enabled then ui.EndDisabled() end
   return enabled and pressed
 end
@@ -89,35 +156,15 @@ local function open_form(kind, defaults)
   }
 end
 
-local function toolbar(plugin, state)
-  if ui.Button("New round") then open_form("new", state.defaults or {}) end
-  ui.SameLine()
-  if ui.Button("History") then panel = "history" end
-  ui.SameLine()
-  if ui.Button("Defaults") then open_form("defaults", state.defaults or {}) end
-  ui.SameLine()
-  if ui.Button(state.mini and "Expand" or "Mini") then
-    act(plugin, "layout", state.view, not state.mini)
-  end
-end
-
-local function round_picker(plugin, state, scale)
+local function round_picker(plugin, state, width)
   local selected = state.current
-  local rounds = state.rounds or {}
-  local active = 0
-  for _, round in ipairs(rounds) do
-    if not round.closed then active = active + 1 end
-  end
-  if active == 0 and not selected then return end
-
-  local count_text = string.format("%d open", active)
-  ui.SetNextItemWidth(math.max(108 * scale, ui.GetContentRegionAvail() - ui.CalcTextSize(count_text) - 10 * scale))
+  ui.SetNextItemWidth(width)
   local preview = "Select a round"
   if selected then
-    preview = range_text(selected) .. " · " .. (state.mini and selected.label or selected.status)
+    preview = range_text(selected) .. " · " .. selected.label
   end
   if ui.BeginCombo("##active-round", preview) then
-    for _, round in ipairs(rounds) do
+    for _, round in ipairs(state.rounds or {}) do
       if not round.closed or round.id == state.selected then
         local label = tostring(round.label or ""):gsub("#", "＃")
         local detail = round.closed and round.status or round.remaining >= 0 and time_text(round.remaining) or "Rolling"
@@ -129,20 +176,117 @@ local function round_picker(plugin, state, scale)
     end
     ui.EndCombo()
   end
-  ui.SameLine()
-  ui.TextDisabled(count_text)
 end
 
-local function round_controls(plugin, round, scale)
+local function title_bar(plugin, state, scale, compact)
+  local width = ui.GetContentRegionAvail()
+  local gap = 6 * scale
+  local brand = 94 * scale
+  local nav_width = compact and 96 * scale or 220 * scale
+  local picker = width - brand - nav_width - 2 * gap
+  local inline_picker = compact and picker >= 92 * scale
+  local nav_on_row = width >= brand + nav_width + gap
+  local x, y = ui.GetCursorScreenPos()
+  local _, line = ui.CalcTextSize("Dicewatch")
+  local height = math.max(29 * scale, line + 8 * scale)
+  rectangle(x, y, width, height, title, 4 * scale)
+
+  local die, icon_x, icon_y = 13 * scale, x + 7 * scale, y + (height - 13 * scale) / 2
+  ui.DrawRect(icon_x, icon_y, icon_x + die, icon_y + die, accent[1], accent[2], accent[3], 1, 3 * scale, scale)
+  for i = 1, 3 do
+    rectangle(icon_x + (1 + 3 * i) * scale, icon_y + (10 - 3 * (i - 1)) * scale,
+      1.5 * scale, 1.5 * scale, accent, scale)
+  end
+  draw_text(icon_x + die + 6 * scale, y + (height - line) / 2, ink, "Dicewatch")
+  ui.Dummy(inline_picker and brand or (nav_on_row and width - nav_width - gap or width), height)
+  if inline_picker then
+    ui.SameLine(0, gap)
+    round_picker(plugin, state, picker)
+  end
+  if nav_on_row then ui.SameLine(0, gap) end
+  if not compact then
+    if styled_button("History", 62 * scale, height, flat_colors) then panel = "history" end
+    ui.SameLine(0, gap)
+    if styled_button("Defaults", 69 * scale, height, flat_colors) then open_form("defaults", state.defaults or {}) end
+    ui.SameLine(0, gap)
+  end
+  if ui.Button(compact and "Expand" or "Mini", (compact and 62 or 42) * scale, height) then
+    act(plugin, "layout", state.view, not state.mini)
+    panel = "round"
+  end
+  ui.SameLine(0, gap)
+  if styled_button("×##close", 25 * scale, height, flat_colors) then act(plugin, "hide") end
+  if ui.IsItemHovered() then ui.SetTooltip("Close Dicewatch") end
+  if compact and not inline_picker then round_picker(plugin, state, width) end
+  ui.Separator()
+end
+
+local function round_card(plugin, round, selected, width, height, scale)
+  local x, y = ui.GetCursorScreenPos()
+  local pressed
+  if selected then pressed = styled_button("##round" .. round.id, width, height, selected_colors)
+  else pressed = ui.Button("##round" .. round.id, width, height) end
+  if pressed and not selected then act(plugin, "select", round.id) end
+  local inset = 7 * scale
+  local _, line = ui.CalcTextSize("Ag")
+  local detail
   if round.closed then
-    if type(round.summary) == "string" and round.summary ~= "" and ui.Button("Results") then
+    detail = round.status
+  elseif round.remaining >= 0 then
+    detail = time_text(round.remaining)
+    if ui.CalcTextSize(detail .. " left") <= width - 2 * inset then detail = detail .. " left" end
+  else
+    detail = string.format("%d %s", round.total, round.total == 1 and "roll" or "rolls")
+  end
+  clipped_text(x + inset, y + 5 * scale, width - 2 * inset, line, selected and accent or ink, range_text(round))
+  clipped_text(x + inset, y + line + 7 * scale, width - 2 * inset, line, ink, round.label)
+  clipped_text(x + inset, y + 2 * line + 8 * scale, width - 2 * inset, line, muted, detail)
+  if ui.IsItemHovered() then ui.SetTooltip(round.label .. " · " .. range_text(round) .. " · " .. detail) end
+end
+
+local function round_cards(plugin, state, scale)
+  local available = ui.GetContentRegionAvail()
+  local left = ui.GetCursorPos()
+  ui.TextDisabled("Loot rounds")
+  local button_width = 69 * scale
+  if available >= 159 * scale then ui.SameLine(left + available - button_width) end
+  if styled_button("+ Round", button_width, 0, flat_colors) then open_form("new", state.defaults or {}) end
+
+  local rounds = {}
+  for _, round in ipairs(state.rounds or {}) do
+    if not round.closed or round.id == state.selected then rounds[#rounds + 1] = round end
+  end
+  if #rounds == 0 then
+    ui.TextDisabled("No open rounds")
+    return
+  end
+
+  local columns = available >= 416 * scale and 4 or available >= 208 * scale and 2 or 1
+  local gap = 6 * scale
+  local _, line = ui.CalcTextSize("Ag")
+  local height = 3 * line + 13 * scale
+  local scrolling = #rounds > columns * 2
+  if scrolling then ui.BeginChild("##round-cards", 0, 2 * height + 6 * scale, false) end
+  local content_width = ui.GetContentRegionAvail()
+  local width = #rounds == 1 and math.min(content_width, 228 * scale)
+    or (content_width - (columns - 1) * gap) / columns
+  for index, round in ipairs(rounds) do
+    if (index - 1) % columns ~= 0 then ui.SameLine(0, gap) end
+    round_card(plugin, round, round.id == state.selected, width, height, scale)
+  end
+  if scrolling then ui.EndChild() end
+end
+
+local function round_controls(plugin, round, scale, compact)
+  if round.closed then
+    if compact and type(round.summary) == "string" and round.summary ~= "" and ui.Button("Results") then
       panel = "results"
     end
     return
   end
 
   local preview = round.remaining >= 0 and ("Auto " .. time_text(round.remaining)) or "Auto end"
-  ui.SetNextItemWidth(126 * scale)
+  ui.SetNextItemWidth(111 * scale)
   if ui.BeginCombo("##auto-end", preview) then
     for _, seconds in ipairs(timer_presets) do
       if ui.Selectable(seconds == 0 and "Off" or (seconds .. " seconds"), seconds == 0 and round.remaining < 0) then
@@ -156,13 +300,15 @@ local function round_controls(plugin, round, scale)
     end
     ui.EndCombo()
   end
-  ui.SameLine()
-  if ui.Button("End") then
+  ui.SameLine(0, 6 * scale)
+  if styled_button("End", 43 * scale, 0, primary_colors) then
     timer_edit = nil
     act(plugin, "end", round.id)
   end
+end
 
-  if timer_edit == round.id then
+local function custom_timer(plugin, round, scale)
+  if timer_edit == round.id and not round.closed then
     timer_text = seconds_input("##timer-seconds", timer_text, 76 * scale)
     ui.SameLine()
     local seconds = duration_of(timer_text)
@@ -175,38 +321,43 @@ local function round_controls(plugin, round, scale)
   end
 end
 
-local function roll_table(key, entries, show_heading, scale)
+local function roll_table(key, entries, show_heading, scale, width, leader_roll)
   local ranked = key == "ranked"
   if show_heading then ui.Text(ranked and "Ranked" or "Roll log") end
   if #entries == 0 then
     ui.TextDisabled(ranked and "No eligible rolls yet" or "No rolls yet")
+    if show_heading then ui.Dummy(width, 0) end
     return
   end
 
   local max_page = math.ceil(#entries / page_size)
   local page = math.min(pages[key], max_page)
-  local flags = ui.TableFlags.RowBg | ui.TableFlags.BordersInnerH | ui.TableFlags.SizingStretchProp
-  if ui.BeginTable("##" .. key, ranked and 3 or 4, flags) then
-    ui.TableSetupColumn(ranked and "Rank" or "Time", ui.TableColumnFlags.WidthFixed, 44 * scale)
-    ui.TableSetupColumn("Player", ui.TableColumnFlags.WidthStretch)
-    ui.TableSetupColumn("Roll", ui.TableColumnFlags.WidthFixed, 43 * scale)
-    if not ranked then ui.TableSetupColumn("Status", ui.TableColumnFlags.WidthFixed, 87 * scale) end
-    ui.TableHeadersRow()
-    for index = (page - 1) * page_size + 1, math.min(page * page_size, #entries) do
-      local row = entries[index]
-      ui.TableNextRow()
-      ui.TableNextColumn()
-      ui.Text(ranked and tostring(row.rank) or time_text(row.time))
-      ui.TableNextColumn()
-      ui.TextWrapped(row.player)
-      ui.TableNextColumn()
-      if ranked and row.rank == 1 then tint(accent, tostring(row.value)) else ui.Text(tostring(row.value)) end
-      if not ranked then
-        ui.TableNextColumn()
-        if row.status == "Counted" then ui.Text(row.status) else ui.TextDisabled(row.status or "") end
-      end
-    end
-    ui.EndTable()
+  local _, line = ui.CalcTextSize("Ag")
+  local inset = 6 * scale
+  local first_col = 47 * scale
+  local roll_col = 45 * scale
+  local status_col = ranked and 0 or math.min(width * 0.32, 87 * scale)
+  local row_height = line + 8 * scale
+  local function row(first, player, value, status, selected, heading)
+    local x, y = ui.GetCursorScreenPos()
+    local text_y = y + (row_height - line) / 2
+    if selected then rectangle(x, y, width, row_height, emphasis) end
+    local right = x + width - inset - status_col
+    local value_width = ui.CalcTextSize(value)
+    clipped_text(x + inset, text_y, first_col - inset, line, muted, first)
+    clipped_text(x + first_col, text_y, width - first_col - roll_col - status_col - 2 * inset,
+      line, heading and muted or ink, player)
+    draw_text(right - value_width, text_y, heading and muted or (selected and accent or ink), value)
+    if not ranked then clipped_text(right + inset * 2, text_y, status_col - inset, line, muted, status) end
+    rectangle(x, y + row_height - 1, width, 1, rule)
+    ui.Dummy(width, row_height - 4 * scale)
+  end
+  row(ranked and "Rank" or "Time", "Player", "Roll", "Status", false, true)
+  for index = (page - 1) * page_size + 1, math.min(page * page_size, #entries) do
+    local entry = entries[index]
+    local leading = ranked and entry.rank == 1 or (entry.status == "Counted" and entry.value == leader_roll)
+    row(ranked and tostring(entry.rank) or time_text(entry.time), entry.player, tostring(entry.value),
+      entry.status or "", leading, false)
   end
   if max_page > 1 then
     if action_button("Prev##" .. key, page > 1) then page = page - 1 end
@@ -218,33 +369,121 @@ local function roll_table(key, entries, show_heading, scale)
   pages[key] = page
 end
 
-local function current_round(plugin, state, scale)
-  toolbar(plugin, state)
-  round_picker(plugin, state, scale)
+local function round_heading(plugin, round, scale, compact)
+  local width = ui.GetContentRegionAvail()
+  local actions_width = (round.closed and 82 or 160) * scale
+  local gap = 8 * scale
+  local beside = width >= actions_width + (compact and 130 or 165) * scale and (not round.closed or compact)
+  local info_width = beside and width - actions_width - gap or width
+  local _, line = ui.CalcTextSize("Ag")
+  local function info(shade, text)
+    local x, y = ui.GetCursorScreenPos()
+    clipped_text(x, y, info_width, line, shade, text)
+    ui.Dummy(info_width, line)
+  end
+  ui.BeginGroup()
+  info(round.closed and muted or good, "●  " .. round.status:upper())
+  if compact then
+    if round.leader and round.leader ~= "" then info(accent, round.leader) end
+  else
+    info(ink, round.label)
+    local rule_text = range_text(round)
+    if round.order == "high" then rule_text = rule_text .. " · High wins" end
+    if round.order == "low" then rule_text = rule_text .. " · Low wins" end
+    if round.linked then rule_text = rule_text .. " · Linked item" end
+    info(muted, rule_text)
+  end
+  ui.EndGroup()
+  if beside then ui.SameLine(0, gap) end
+  round_controls(plugin, round, scale, compact)
+  custom_timer(plugin, round, scale)
+end
+
+local function round_views(plugin, state, round, scale)
+  local view = state.view or "ranked"
+  local width = ui.GetContentRegionAvail()
+  local excluded = round.total - round.counted
+  local excluded_text = excluded > 0 and string.format("%d excluded", excluded) or ""
+  local left = ui.GetCursorPos()
+  for index, choice in ipairs(views) do
+    if index > 1 then ui.SameLine(0, 4 * scale) end
+    local button_width = ui.CalcTextSize(choice[2]) + 16 * scale
+    local clicked
+    if choice[1] == view then clicked = styled_button(choice[2], button_width, 0, selected_colors)
+    else clicked = ui.Button(choice[2], button_width) end
+    if clicked and choice[1] ~= view then act(plugin, "layout", choice[1], false) end
+  end
+  if excluded_text ~= "" then
+    local text_width = ui.CalcTextSize(excluded_text)
+    if width >= 175 * scale + text_width then ui.SameLine(left + width - text_width) end
+    ui.TextDisabled(excluded_text)
+  end
+
+  local ranked, log = round.ranked or {}, round.log or {}
+  local leader_roll = ranked[1] and ranked[1].value
+  if view == "ranked" then
+    roll_table("ranked", ranked, false, scale, width)
+  elseif view == "log" then
+    roll_table("log", log, false, scale, width, leader_roll)
+  else
+    local beside = width >= 536 * scale
+    local gap = 15 * scale
+    local rank_width = beside and math.floor((width - gap) * 0.40) or width
+    local log_width = beside and width - gap - rank_width or width
+    ui.BeginGroup()
+    roll_table("ranked", ranked, true, scale, rank_width)
+    ui.EndGroup()
+    local x, y, _, bottom = ui.GetItemRect()
+    if beside then ui.SameLine(0, gap) else ui.Spacing() end
+    ui.BeginGroup()
+    roll_table("log", log, true, scale, log_width, leader_roll)
+    ui.EndGroup()
+    if beside then
+      local _, _, _, other_bottom = ui.GetItemRect()
+      rectangle(x + rank_width + gap / 2, y, 1, math.max(bottom, other_bottom) - y, rule)
+    end
+  end
+end
+
+local function round_footer(round, scale)
+  ui.Separator()
+  local available = ui.GetContentRegionAvail()
+  local left = ui.GetCursorPos()
+  local has_result = round.closed and type(round.summary) == "string" and round.summary ~= ""
+  local button_width = 68 * scale
+  local summary = round.closed and round.leader and round.leader ~= "" and round.leader
+    or string.format("%d %s · %d %s", round.counted, round.counted == 1 and "player" or "players",
+      round.total, round.total == 1 and "roll" or "rolls")
+  if has_result and ui.CalcTextSize(summary) + button_width + 10 * scale <= available then
+    ui.TextDisabled(summary)
+    ui.SameLine(left + available - button_width)
+  else
+    wrap_tint(muted, summary)
+  end
+  if has_result and styled_button("Results", button_width, 0, flat_colors) then panel = "results" end
+end
+
+local function current_round(plugin, state, scale, compact)
+  if not compact then
+    round_cards(plugin, state, scale)
+    ui.Separator()
+  end
   local round = state.current
   if not round then
     ui.TextDisabled(state.ready and "No round selected" or "Roll tracking is unavailable")
+    if compact and ui.Button("+ Round") then open_form("new", state.defaults or {}) end
     return
   end
 
-  ui.Separator()
-  if not state.mini then ui.TextWrapped(round.label) end
-  if round.closed then ui.TextDisabled(round.status) else tint(good, round.status) end
-  ui.SameLine()
-  ui.TextDisabled(string.format("%d counted / %d rolls", round.counted, round.total))
+  round_heading(plugin, round, scale, compact)
   if (round.dropped or 0) > 0 then
     tint(warning, string.format("%d beyond the roll limit", round.dropped))
   end
-  if round.leader and round.leader ~= "" then wrap_tint(accent, round.leader) end
-  round_controls(plugin, round, scale)
-  if state.mini then return end
+  if compact then return end
 
   ui.Separator()
-  local view = basic_combo("##view", state.view or "ranked", views, 118 * scale)
-  if view ~= state.view then act(plugin, "layout", view, false) end
-  local show_both = view == "both"
-  if view == "ranked" or show_both then roll_table("ranked", round.ranked or {}, show_both, scale) end
-  if view == "log" or show_both then roll_table("log", round.log or {}, show_both, scale) end
+  round_views(plugin, state, round, scale)
+  round_footer(round, scale)
 end
 
 local function back(title)
@@ -282,11 +521,11 @@ local function rules_form(plugin, state, scale)
   local seconds = duration_of(draft.duration)
   if seconds == nil then ui.TextDisabled("Enter 0 to 3600 seconds") end
   if is_new then
-    if action_button("Start round", state.ready and seconds ~= nil and draft.range:find("%S") ~= nil) then
+    if action_button("Start round", state.ready and seconds ~= nil and draft.range:find("%S") ~= nil, primary_colors) then
       pending_start = state.selected or 0
       act(plugin, "start", draft.range, draft.label, draft.duplicate, draft.order, seconds)
     end
-  elseif action_button("Save defaults", state.ready and seconds ~= nil) then
+  elseif action_button("Save defaults", state.ready and seconds ~= nil, primary_colors) then
     act(plugin, "defaults", draft.duplicate, draft.order, seconds)
     panel = "round"
   end
@@ -333,7 +572,7 @@ local function history(state, scale)
 end
 
 ui.window("Dicewatch", function()
-  local plugin = eq.Plugin("dicewatch")
+  local plugin = hs.Plugin("dicewatch")
   if not plugin then
     snapshot, refresh_at = nil, 0
     return
@@ -361,11 +600,30 @@ ui.window("Dicewatch", function()
   local io = ui.GetIO()
   local scale = math.max(0.65, io.uiScale or 1)
   local compact = state.mini and panel == "round"
-  local width = (compact and 338 or 432) * scale
-  ui.SetNextWindowSize(math.min(width, (io.width or 1280) - 24), 0, ui.Cond.Always)
-  local shown, open = ui.Begin("Dicewatch", true, ui.WindowFlags.NoCollapse | ui.WindowFlags.AlwaysAutoResize)
-  if not open then act(plugin, "hide") end
-  if shown and open then
+  local width = (compact and 370 or state.view == "both" and panel == "round" and 650 or 506) * scale
+  local screen_width = io.width or 1280
+  width = math.floor(math.max(1, math.min(width, screen_width - 24)))
+  local rightmost = math.max(0, screen_width - width - 12)
+  local x, y = ui.FindWindowRect("Dicewatch")
+  if x and (x < 0 or x > rightmost) then
+    ui.SetNextWindowPos(math.max(0, math.min(x, rightmost)), y, ui.Cond.Always)
+  elseif not x and rightmost < 60 then
+    ui.SetNextWindowPos(rightmost, 60, ui.Cond.FirstUseEver)
+  end
+  local color_count = ui.PushStyleColors(window_colors)
+  ui.PushStyleVar(ui.StyleVar.Alpha, 1)
+  ui.PushStyleVar(ui.StyleVar.WindowPadding, 11 * scale, 9 * scale)
+  ui.PushStyleVar(ui.StyleVar.WindowBorderSize, 1)
+  ui.PushStyleVar(ui.StyleVar.WindowRounding, 7 * scale)
+  ui.PushStyleVar(ui.StyleVar.FrameBorderSize, 1)
+  ui.PushStyleVar(ui.StyleVar.FrameRounding, 4 * scale)
+  ui.PushStyleVar(ui.StyleVar.FramePadding, 7 * scale, 4 * scale)
+  ui.PushStyleVar(ui.StyleVar.ItemSpacing, 6 * scale, 4 * scale)
+  ui.SetNextWindowSize(width, 0, ui.Cond.Always)
+  ui.SetNextWindowBgAlpha(1)
+  local shown = ui.Begin("Dicewatch", true, ui.WindowFlags.NoTitleBar | ui.WindowFlags.AlwaysAutoResize)
+  if shown then
+    title_bar(plugin, state, scale, compact)
     if panel == "new" or panel == "defaults" then
       rules_form(plugin, state, scale)
     elseif panel == "history" then
@@ -374,11 +632,14 @@ ui.window("Dicewatch", function()
       back("Round results")
       if panel == "results" then results_text(state.current, scale) end
     else
-      current_round(plugin, state, scale)
+      current_round(plugin, state, scale, compact)
     end
-    if type(state.message) == "string" and state.message ~= "" and (state.error or not compact) then
+    if type(state.message) == "string" and state.message ~= "" and
+      (state.error or state.message:find("for this session", 1, true)) then
       if state.error then wrap_tint(warning, state.message) else ui.TextWrapped(state.message) end
     end
   end
   ui.End()
+  ui.PopStyleVar(8)
+  ui.PopStyleColor(color_count)
 end)

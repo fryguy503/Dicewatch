@@ -275,6 +275,7 @@ void commands_roll_packets_and_ui() {
     CHECK(state.boolean("open") && state.boolean("ready"));
     const auto first = state.integer("selected");
     CHECK(first > 0 && state.at("current").integer("low") == 0 && state.at("current").integer("high") == 1000);
+    CHECK(state.at("current").string("order") == "high");
     CHECK(state.at("current").string("label") == "Trust's armor" && !state.at("current").boolean("linked"));
 
     fake.command("/itemroll", "200-1000 " + stock_item_link());
@@ -403,6 +404,8 @@ void preferences() {
     CHECK(state.boolean("mini") && state.string("view") == "both");
     CHECK(state.at("defaults").string("duplicate") == "best" && state.at("defaults").string("order") == "low");
     CHECK(state.at("defaults").integer("duration") == 12);
+    fake.command("/itemroll", "2500 Lowest wins");
+    CHECK(fake.model().at("current").string("order") == "low");
 }
 
 } // namespace
