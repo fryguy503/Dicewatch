@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(dicewatch VERSION 0.1.1 LANGUAGES CXX)
+project(dicewatch VERSION 0.2.0 LANGUAGES CXX)
 
 include(CTest)
 
@@ -24,13 +24,21 @@ set_target_properties(dicewatch_rounds PROPERTIES
 target_include_directories(dicewatch_rounds PUBLIC src)
 dicewatch_compile_options(dicewatch_rounds)
 
-add_library(dicewatch SHARED src/dicewatch.cpp)
+add_library(dicewatch_ledger STATIC src/ledger.cpp src/raid_summary.cpp src/announcements.cpp)
+set_target_properties(dicewatch_ledger PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON)
+target_link_libraries(dicewatch_ledger PUBLIC dicewatch_rounds)
+dicewatch_compile_options(dicewatch_ledger)
+
+add_library(dicewatch SHARED src/dicewatch.cpp src/clipboard.cpp)
 set_target_properties(dicewatch PROPERTIES
   PREFIX ""
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON)
 target_include_directories(dicewatch SYSTEM PRIVATE vendor/hailstone)
-target_link_libraries(dicewatch PRIVATE dicewatch_rounds)
+target_link_libraries(dicewatch PRIVATE dicewatch_ledger ${CMAKE_DL_LIBS})
 dicewatch_compile_options(dicewatch)
 if(MSVC)
   target_link_options(dicewatch PRIVATE /GUARD:CF)
@@ -44,14 +52,31 @@ install(FILES LICENSE DESTINATION dicewatch RENAME LICENSE.txt)
 install(FILES vendor/hailstone/LICENSE DESTINATION dicewatch RENAME LICENSE-Hailstone-SDK.txt)
 
 if(BUILD_TESTING)
+  find_package(Threads REQUIRED)
+
   add_executable(dicewatch_rounds_test tests/rounds_test.cpp)
   target_link_libraries(dicewatch_rounds_test PRIVATE dicewatch_rounds)
   dicewatch_compile_options(dicewatch_rounds_test)
   add_test(NAME dicewatch.rounds COMMAND dicewatch_rounds_test)
 
+  add_executable(dicewatch_ledger_test tests/ledger_test.cpp)
+  target_link_libraries(dicewatch_ledger_test PRIVATE dicewatch_ledger Threads::Threads)
+  dicewatch_compile_options(dicewatch_ledger_test)
+  add_test(NAME dicewatch.ledger COMMAND dicewatch_ledger_test)
+
+  add_executable(dicewatch_raid_summary_test tests/raid_summary_test.cpp)
+  target_link_libraries(dicewatch_raid_summary_test PRIVATE dicewatch_ledger)
+  dicewatch_compile_options(dicewatch_raid_summary_test)
+  add_test(NAME dicewatch.raid_summary COMMAND dicewatch_raid_summary_test)
+
+  add_executable(dicewatch_announcements_test tests/announcements_test.cpp)
+  target_link_libraries(dicewatch_announcements_test PRIVATE dicewatch_ledger)
+  dicewatch_compile_options(dicewatch_announcements_test)
+  add_test(NAME dicewatch.announcements COMMAND dicewatch_announcements_test)
+
   add_executable(dicewatch_host_test tests/host_test.cpp)
   target_include_directories(dicewatch_host_test SYSTEM PRIVATE vendor/hailstone)
-  target_link_libraries(dicewatch_host_test PRIVATE dicewatch)
+  target_link_libraries(dicewatch_host_test PRIVATE dicewatch Threads::Threads)
   dicewatch_compile_options(dicewatch_host_test)
   add_test(NAME dicewatch.host COMMAND dicewatch_host_test)
 

@@ -106,11 +106,13 @@ public:
     [[nodiscard]] const Round* find(RoundId id) const;
     [[nodiscard]] const std::vector<Round>& rounds() const { return rounds_; }
     [[nodiscard]] const std::vector<Round>& history() const { return history_; }
+    [[nodiscard]] std::uint64_t history_revision() const { return history_revision_; }
 
 private:
     void finish(Round& round, EndReason reason, Time now);
 
     RoundId next_id_ = 1;
+    std::uint64_t history_revision_ = 0;
     std::vector<Round> rounds_;
     std::vector<Round> history_;
 };

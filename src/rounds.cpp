@@ -322,6 +322,7 @@ void Tracker::finish(Round& round, EndReason reason, Time now) {
     round.ended_at = now;
     round.end_reason = reason;
     round.deadline.reset();
+    ++history_revision_;
 }
 
 } // namespace dicewatch

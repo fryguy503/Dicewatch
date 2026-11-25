@@ -8,9 +8,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -23,6 +25,7 @@ void ShutdownPlugin() noexcept;
 void SetGameState(int game_state) noexcept;
 void OnBeginZone() noexcept;
 void OnZoned() noexcept;
+void OnPulse() noexcept;
 int OnPacket(int stream, int direction, HailstonePacket* packet) noexcept;
 }
 
@@ -98,6 +101,13 @@ public:
 
     ~TestProfile() {
         std::error_code ignore;
+        const auto ledger = directory / "loot-ledger";
+        if (std::filesystem::is_directory(ledger, ignore)) {
+            for (const auto& entry : std::filesystem::directory_iterator(ledger, ignore)) {
+                std::filesystem::remove(entry.path(), ignore);
+            }
+        }
+        std::filesystem::remove(ledger, ignore);
         std::filesystem::remove(directory / "dicewatch-settings.txt", ignore);
         std::filesystem::remove(directory, ignore);
     }
@@ -113,8 +123,12 @@ public:
     std::uint32_t capabilities = permission_mask;
     std::int32_t game_state = GAMESTATE_INGAME;
     bool in_zone = true;
+    bool in_raid = false;
+    bool in_group = false;
+    std::uint32_t guild_id = std::numeric_limits<std::uint32_t>::max();
     std::string character = "Trust";
     std::vector<std::string> chat;
+    std::vector<std::string> sent_commands;
 
     explicit FakeHost(const std::filesystem::path& directory) : profile_(directory.string()) {
         api_.abi = HAILSTONE_PLUGIN_ABI;
@@ -123,14 +137,23 @@ public:
 
         api_.caps = [](void* opaque) { return self(opaque).capabilities; };
         api_.write_chat = [](void* opaque, const char* line, std::uint32_t) { self(opaque).chat.emplace_back(line); };
+        api_.do_command = [](void* opaque, const char* line) { self(opaque).sent_commands.emplace_back(line); };
         api_.get_player = [](void* opaque, HailstonePlayer* player) {
             const auto& fixture = self(opaque);
             CHECK(player->size == sizeof *player);
             player->spawn_id = 7;
             player->game_state = fixture.game_state;
             player->in_zone = fixture.in_zone ? 1 : 0;
+            player->in_raid = fixture.in_raid ? 1 : 0;
+            player->in_group = fixture.in_group ? 1 : 0;
             CHECK(fixture.character.size() < sizeof player->name);
             std::memcpy(player->name, fixture.character.c_str(), fixture.character.size() + 1);
+            return 1;
+        };
+        api_.get_spawn = [](void* opaque, std::uint32_t id, HailstoneSpawn* spawn) {
+            CHECK(spawn->size == sizeof *spawn);
+            if (id != 7) return 0;
+            spawn->guild_id = self(opaque).guild_id;
             return 1;
         };
         api_.character_config_dir = [](void* opaque, char* out, std::size_t capacity) {
@@ -193,6 +216,7 @@ public:
         InitializePlugin();
         CHECK(commands_.count("/itemroll") == 1 && commands_.count("/dicewatch") == 1);
         CHECK(functions_.count("state") == 1 && functions_.count("action") == 1);
+        CHECK(functions_.count("ledger") == 1 && functions_.count("raid_summary") == 1);
     }
 
     void shutdown() {
@@ -205,14 +229,16 @@ public:
         fn(context, args.c_str());
     }
 
-    Node model() {
-        const auto& [fn, context] = functions_.at("state");
+    Node value(const char* method, std::vector<HostValue> values = {}) {
+        const auto& [fn, context] = functions_.at(method);
         HailstoneOut out;
-        const HailstoneArgs args;
+        const HailstoneArgs args{std::move(values)};
         CHECK(fn(context, &args, &out) == 1);
         CHECK(out.root_written && out.scopes.empty());
         return std::move(out.root);
     }
+
+    Node model() { return value("state"); }
 
     void action(std::vector<HostValue> values) {
         const auto& [fn, context] = functions_.at("action");
@@ -408,6 +434,156 @@ void preferences() {
     CHECK(fake.model().at("current").string("order") == "low");
 }
 
+void loot_ledger_survives_relog() {
+    TestProfile profile;
+    FakeHost fake(profile.directory);
+    fake.initialize();
+    fake.command("/itemroll", "1000 Raid Blade");
+    const auto initial = fake.model();
+    const auto session = initial.string("ledger_session");
+    CHECK(session.size() == 32);
+    dispatch(reply(0, 1000, 921, "Trust"));
+    dispatch(reply(0, 1000, 860, "Thalen"));
+    dispatch(reply(0, 1000, 1000, "Trust"));
+    fake.action({std::string("end"), initial.integer("selected")});
+
+    const auto states = fake.value("ledger");
+    CHECK(states.string("current_session") == session);
+    CHECK(states.at("entries").items.size() == 1);
+    const auto key = states.at("entries").items.front().string("key");
+    const auto updated = fake.model();
+    CHECK(updated.integer("ledger_revision") > initial.integer("ledger_revision"));
+    CHECK(updated.at("current").string("key") == key);
+
+    auto selected = fake.value("ledger", {key}).at("selected");
+    CHECK(selected.string("leader").find("Trust") != std::string::npos);
+    CHECK(selected.string("recipient").empty());
+    CHECK(selected.at("log").items.front().string("status") == "Duplicate");
+    CHECK(!fake.value("action", {std::string("award"), key, std::string("Injected\nLine")}).boolean("ok"));
+    CHECK(fake.value("action", {std::string("award"), key, std::string("  Thalen  ")}).boolean("ok"));
+    const auto stored = profile.directory / "loot-ledger" / (key + ".dwl");
+    const auto backup = profile.directory / "loot-ledger" / "saved-receipt.bak";
+    std::filesystem::rename(stored, backup);
+    CHECK(std::filesystem::create_directory(stored));
+    CHECK(!fake.value("action", {std::string("award"), key, std::string("Trust")}).boolean("ok"));
+    CHECK(fake.value("ledger", {key}).at("selected").string("recipient") == "Thalen");
+    CHECK(std::filesystem::remove(stored));
+    std::filesystem::rename(backup, stored);
+    auto export_pages = fake.value("raid_summary", {session});
+    CHECK(!export_pages.items.empty());
+    auto report = std::get<std::string>(export_pages.items.front().value);
+    CHECK(report.find("Raid Blade") != std::string::npos && report.find("Trust") != std::string::npos &&
+          report.find("Thalen") != std::string::npos);
+    fake.shutdown();
+
+    fake.initialize();
+    fake.command("/dicewatch");
+    const auto recovered = fake.value("ledger", {key});
+    CHECK(recovered.string("current_session") != session);
+    CHECK(recovered.at("sessions").items.size() == 2);
+    selected = recovered.at("selected");
+    CHECK(selected.string("session") == session && selected.string("recipient") == "Thalen");
+    CHECK(selected.at("ranked").items.front().integer("value") == 921);
+    CHECK(selected.at("log").items.size() == 3);
+    CHECK(fake.model().at("rounds").items.empty());
+    CHECK(fake.value("action", {std::string("award"), key, std::string{}}).boolean("ok"));
+    CHECK(fake.value("ledger", {key}).at("selected").string("recipient").empty());
+
+    fake.command("/itemroll", "500 Timed round");
+    fake.action({std::string("timer"), fake.model().integer("selected"), std::int64_t(1)});
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    OnPulse();
+    CHECK(fake.value("ledger").at("entries").items.front().string("status") == "Auto-ended");
+    fake.shutdown();
+
+    TestProfile other;
+    FakeHost other_character(other.directory);
+    other_character.initialize();
+    other_character.command("/dicewatch");
+    CHECK(other_character.value("ledger").at("entries").items.empty());
+    CHECK(!other_character.value("action", {std::string("award"), key, std::string("Trust")}).boolean("ok"));
+    other_character.shutdown();
+}
+
+void announcement_settings_and_delivery() {
+    TestProfile profile;
+    {
+        std::ofstream legacy(profile.directory / "dicewatch-settings.txt", std::ios::binary);
+        legacy << "dicewatch1 best high 30 both 0\n";
+    }
+    FakeHost fake(profile.directory);
+    fake.initialize();
+    fake.command("/dicewatch");
+    const auto initial = fake.model();
+    CHECK(initial.string("view") == "both" && initial.at("defaults").integer("duration") == 30);
+    CHECK(initial.at("announcements").string("start_mode") == "off" && initial.at("announcements").string("award_mode") == "off");
+    CHECK(initial.at("announcements").string("start_preview").find("/random 200 1000") != std::string::npos);
+    CHECK(!fake.value("action", {std::string("announcements"), std::string("send"), std::string("/warn"),
+                                 std::string("off"), std::string("say")}).boolean("ok"));
+    CHECK(fake.value("action", {std::string("announcements"), std::string("send"), std::string("raid"),
+                                std::string("send"), std::string("guild")}).boolean("ok"));
+
+    fake.command("/itemroll", "100 Girdle");
+    CHECK(fake.sent_commands.empty());
+    auto notice = fake.model().at("announcement");
+    CHECK(notice.string("kind") == "blocked" && notice.string("status").find("chat permission") != std::string::npos);
+    fake.action({std::string("end"), fake.model().integer("selected")});
+    CHECK(fake.model().at("announcement").integer("revision") == notice.integer("revision"));
+    const auto stale = fake.value("action", {std::string("announcement_copy"), notice.integer("revision") + 1});
+    CHECK(!stale.boolean("ok") && stale.string("message").find("announcement changed") != std::string::npos);
+    fake.capabilities |= HAILSTONE_CAP_CHAT;
+    fake.action({std::string("announcement_dismiss"), notice.integer("revision")});
+    fake.command("/itemroll", "500 Greaves");
+    CHECK(fake.sent_commands.empty() && fake.model().at("announcement").string("status").find("needs a raid") != std::string::npos);
+
+    fake.in_raid = true;
+    fake.guild_id = 17;
+    fake.command("/itemroll", "200-1000 Banner ${Me.Name} %t");
+    CHECK(fake.sent_commands.size() == 1);
+    const auto& opened = fake.sent_commands.front();
+    CHECK(opened.find("/rsay ") == 0 && opened.find("/random 200 1000") != std::string::npos);
+    CHECK(opened.find("30 seconds") != std::string::npos && opened.find("${") == std::string::npos && opened.find('%') == std::string::npos);
+    CHECK(fake.model().at("announcement").string("kind") == "sent");
+    fake.command("/itemroll", "200-1000 Already open");
+    CHECK(fake.sent_commands.size() == 1);
+    dispatch(reply(200, 1000, 921, "Trust"));
+    dispatch(reply(200, 1000, 803, "Wren"));
+    fake.action({std::string("end"), fake.model().integer("selected")});
+    CHECK(fake.sent_commands.size() == 1);
+    const auto key = fake.model().at("current").string("key");
+    CHECK(!fake.value("action", {std::string("award"), key, std::string("invalid\nname")}).boolean("ok"));
+    CHECK(fake.sent_commands.size() == 1);
+    CHECK(fake.value("action", {std::string("award"), key, std::string("Wren")}).boolean("ok"));
+    CHECK(fake.sent_commands.size() == 2);
+    const auto& awarded = fake.sent_commands.back();
+    CHECK(awarded.find("/guildsay ") == 0 && awarded.find("to Wren") != std::string::npos &&
+          awarded.find("Trust (921)") != std::string::npos);
+    CHECK(fake.model().at("announcement").string("event") == "award");
+    CHECK(fake.value("action", {std::string("award"), key, std::string("wren")}).boolean("ok"));
+    CHECK(fake.value("action", {std::string("award"), key, std::string()}).boolean("ok"));
+    CHECK(fake.sent_commands.size() == 2);
+
+    fake.shutdown();
+    fake.initialize();
+    fake.command("/dicewatch");
+    CHECK(fake.model().fields.count("announcement") == 0);
+    const auto available = fake.model().at("announcements");
+    CHECK(available.string("start_mode") == "send" && available.string("start_channel") == "raid");
+    CHECK(available.string("award_mode") == "send" && available.string("award_channel") == "guild");
+    CHECK(fake.value("action", {std::string("award"), key, std::string("Trust")}).boolean("ok"));
+    CHECK(fake.sent_commands.size() == 2); // Editing a previous session stays local.
+    if (!available.boolean("clipboard_available")) {
+        CHECK(fake.value("action", {std::string("announcements"), std::string("copy"), std::string("raid"),
+                                    std::string("off"), std::string("guild")}).boolean("ok"));
+        fake.command("/itemroll", "2500 Copy demo");
+        notice = fake.model().at("announcement");
+        CHECK(notice.string("kind") == "blocked" && notice.string("message").find("/random 2500") != std::string::npos);
+        CHECK(!fake.value("action", {std::string("announcement_copy"), notice.integer("revision")}).boolean("ok"));
+        CHECK(fake.sent_commands.size() == 2);
+    }
+    fake.shutdown();
+}
+
 } // namespace
 
 int main() {
@@ -415,6 +591,8 @@ int main() {
         commands_roll_packets_and_ui();
         zone_and_capability_changes();
         preferences();
+        loot_ledger_survives_relog();
+        announcement_settings_and_delivery();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;

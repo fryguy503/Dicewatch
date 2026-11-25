@@ -6,14 +6,23 @@ local orders = { { "high", "Highest roll" }, { "low", "Lowest roll" } }
 local ranges = {
   { "100", "0–100" }, { "500", "0–500" }, { "1000", "0–1000" }, { "5000", "0–5000" }, { "custom", "Custom" },
 }
+local announcement_modes = { { "off", "Off" }, { "copy", "Copy" }, { "send", "Auto-send" } }
+local announcement_channels = { { "raid", "Raid say" }, { "group", "Group" }, { "guild", "Guild" }, { "say", "Say" } }
+local chat_commands = { raid = "/rs", group = "/g", guild = "/gu", say = "/say" }
+local settings_tabs = { { "announce", "Announcements" }, { "defaults", "Round defaults" } }
 local timer_presets = { 0, 10, 30, 60 }
 local page_size = 8
 
 local panel = "round"
-local draft, active_id, history_id, pending_start
+local draft, active_id, pending_start
 local timer_edit, timer_text
 local pages = { ranked = 1, log = 1 }
 local snapshot, refresh_at = nil, 0
+local ledger = { filter = "", view = "ranked", pages = { ranked = 1, log = 1 }, refresh_at = 0 }
+local discord = { page = 1 }
+local settings_tab = "announce"
+local announcement_draft, announcement_feedback
+local notice_view = {}
 
 local function act(plugin, ...)
   refresh_at = 0
@@ -119,11 +128,26 @@ local function basic_combo(id, current, choices, width)
   ui.SetNextItemWidth(width)
   if ui.BeginCombo(id, preview) then
     for _, choice in ipairs(choices) do
-      if ui.Selectable(choice[2], current == choice[1]) then current = choice[1] end
+      local label = choice[2]:gsub("#", "＃") .. "##" .. choice[1]
+      if ui.Selectable(label, current == choice[1]) then current = choice[1] end
     end
     ui.EndCombo()
   end
   return current
+end
+
+local function setting_buttons(id, current, choices, scale)
+  local picked = current
+  for index, choice in ipairs(choices) do
+    if index > 1 then ui.SameLine(0, 4 * scale) end
+    local label = choice[2] .. "##" .. id
+    local width = ui.CalcTextSize(choice[2]) + 16 * scale
+    local clicked
+    if choice[1] == current then clicked = styled_button(label, width, 0, selected_colors)
+    else clicked = ui.Button(label, width) end
+    if clicked then picked = choice[1] end
+  end
+  return picked
 end
 
 local function time_text(seconds)
@@ -147,13 +171,32 @@ local function duration_of(text)
   end
 end
 
-local function open_form(kind, defaults)
-  panel = kind
-  draft = {
+local function round_draft(defaults)
+  return {
     label = "", range = "100", range_choice = "100",
     duplicate = defaults.duplicate or "first", order = defaults.order or "high",
     duration = tostring(defaults.duration or 0),
   }
+end
+
+local function open_form(kind, defaults)
+  panel, draft = kind, round_draft(defaults)
+end
+
+local function open_settings(state)
+  local saved = state.announcements or {}
+  panel, pending_start = "settings", nil
+  draft = round_draft(state.defaults or {})
+  announcement_draft = {
+    start_mode = saved.start_mode or "off", start_channel = saved.start_channel or "raid",
+    award_mode = saved.award_mode or "off", award_channel = saved.award_channel or "raid",
+  }
+  announcement_feedback = nil
+end
+
+local function open_ledger(key)
+  panel, ledger.refresh_at, pending_start = "ledger", 0, nil
+  if key then ledger.key, ledger.filter = key, "" end
 end
 
 local function round_picker(plugin, state, width)
@@ -205,9 +248,9 @@ local function title_bar(plugin, state, scale, compact)
   end
   if nav_on_row then ui.SameLine(0, gap) end
   if not compact then
-    if styled_button("History", 62 * scale, height, flat_colors) then panel = "history" end
+    if styled_button("Ledger", 62 * scale, height, flat_colors) then open_ledger() end
     ui.SameLine(0, gap)
-    if styled_button("Defaults", 69 * scale, height, flat_colors) then open_form("defaults", state.defaults or {}) end
+    if styled_button("Settings", 69 * scale, height, flat_colors) then open_settings(state) end
     ui.SameLine(0, gap)
   end
   if ui.Button(compact and "Expand" or "Mini", (compact and 62 or 42) * scale, height) then
@@ -321,7 +364,7 @@ local function custom_timer(plugin, round, scale)
   end
 end
 
-local function roll_table(key, entries, show_heading, scale, width, leader_roll)
+local function roll_table(key, entries, show_heading, scale, width, leader_roll, pagination)
   local ranked = key == "ranked"
   if show_heading then ui.Text(ranked and "Ranked" or "Roll log") end
   if #entries == 0 then
@@ -331,7 +374,8 @@ local function roll_table(key, entries, show_heading, scale, width, leader_roll)
   end
 
   local max_page = math.ceil(#entries / page_size)
-  local page = math.min(pages[key], max_page)
+  pagination = pagination or pages
+  local page = math.min(pagination[key], max_page)
   local _, line = ui.CalcTextSize("Ag")
   local inset = 6 * scale
   local first_col = 47 * scale
@@ -366,7 +410,7 @@ local function roll_table(key, entries, show_heading, scale, width, leader_roll)
     ui.SameLine()
     if action_button("Next##" .. key, page < max_page) then page = page + 1 end
   end
-  pages[key] = page
+  pagination[key] = page
 end
 
 local function round_heading(plugin, round, scale, compact)
@@ -486,10 +530,10 @@ local function current_round(plugin, state, scale, compact)
   round_footer(round, scale)
 end
 
-local function back(title)
+local function back(title, destination)
   if ui.Button("Back") then
     pending_start = nil
-    panel = "round"
+    panel = destination or "round"
   end
   ui.SameLine()
   ui.Text(title)
@@ -498,9 +542,9 @@ end
 
 local function rules_form(plugin, state, scale)
   local is_new = panel == "new"
-  back(is_new and "New round" or "Round defaults")
-  if panel == "round" then return end
   if is_new then
+    back("New round")
+    if panel == "round" then return end
     ui.SetNextItemWidth(-1)
     draft.label = ui.InputTextWithHint("##label", "Item or round name (optional)", draft.label, 161)
     ui.TextDisabled("Roll range")
@@ -531,6 +575,112 @@ local function rules_form(plugin, state, scale)
   end
 end
 
+local function read_only_text(id, text, height)
+  ui.InputTextMultiline(id, text, #text + 1, -1, height,
+    ui.InputTextFlags.ReadOnly | ui.InputTextFlags.AutoSelectAll)
+end
+
+local function announcement_group(label, event, prefs, scale)
+  local mode_key, channel_key = event .. "_mode", event .. "_channel"
+  local width = ui.GetContentRegionAvail()
+  ui.Text(label)
+  prefs[mode_key] = setting_buttons(event .. "-mode", prefs[mode_key], announcement_modes, scale)
+  local mode = prefs[mode_key]
+  if mode == "send" then
+    if width >= 332 * scale then ui.SameLine(0, 9 * scale) end
+    prefs[channel_key] = basic_combo("Channel##" .. event, prefs[channel_key], announcement_channels, 105 * scale)
+  end
+  if mode == "off" then
+    ui.TextDisabled("Announcements off")
+    return
+  end
+  ui.TextDisabled(mode == "copy" and "Clipboard preview" or ("Chat preview · " .. (chat_commands[prefs[channel_key]] or "")))
+  local preview = prefs[event .. "_preview"]
+  if type(preview) == "string" and preview ~= "" then ui.TextWrapped(preview) end
+end
+
+local function settings_panel(plugin, state, scale)
+  back("Settings")
+  if panel ~= "settings" then return end
+  settings_tab = setting_buttons("settings", settings_tab, settings_tabs, scale)
+  ui.Separator()
+  if settings_tab == "defaults" then
+    rules_form(plugin, state, scale)
+    return
+  end
+
+  local saved, prefs = state.announcements, announcement_draft
+  if type(saved) ~= "table" then
+    ui.TextDisabled("Announcement settings are unavailable.")
+    return
+  end
+  prefs.start_preview, prefs.award_preview = saved.start_preview, saved.award_preview
+  announcement_group("When a round opens", "start", prefs, scale)
+  ui.Separator()
+  announcement_group("When an award is saved", "award", prefs, scale)
+  local sending = prefs.start_mode == "send" or prefs.award_mode == "send"
+  local copying = prefs.start_mode == "copy" or prefs.award_mode == "copy"
+  if sending and saved.chat_allowed == false then
+    wrap_tint(warning, "Chat permission is unavailable here. Auto-send will keep the announcement available to copy.")
+  elseif copying and saved.clipboard_available == false then
+    ui.TextWrapped("Automatic clipboard access is unavailable here. You can select and copy the announcement text.")
+  end
+
+  ui.Separator()
+  local changed = prefs.start_mode ~= saved.start_mode or prefs.start_channel ~= saved.start_channel or
+    prefs.award_mode ~= saved.award_mode or prefs.award_channel ~= saved.award_channel
+  if action_button("Save announcements", changed, primary_colors) then
+    local result = act(plugin, "announcements", prefs.start_mode, prefs.start_channel, prefs.award_mode, prefs.award_channel)
+    announcement_feedback = type(result) == "table" and result or { ok = false, message = "Could not save announcements." }
+  end
+  if announcement_feedback and type(announcement_feedback.message) == "string" and announcement_feedback.message ~= "" then
+    wrap_tint(announcement_feedback.ok and muted or warning, announcement_feedback.message)
+  end
+end
+
+local function announcement_notice(plugin, notice, scale, compact)
+  if type(notice) ~= "table" or type(notice.message) ~= "string" or notice.message == "" then
+    notice_view = {}
+    return
+  end
+  local blocked = notice.kind == "blocked"
+  if notice_view.revision ~= notice.revision or notice_view.message ~= notice.message then
+    notice_view = { revision = notice.revision, message = notice.message, expanded = blocked and not compact }
+  end
+  ui.Separator()
+  local event = notice.event == "award" and "Award saved" or "Round opened"
+  local status = type(notice.status) == "string" and notice.status ~= "" and notice.status or "Announcement available"
+  local label = notice_view.expanded and "Hide text" or "Show text"
+  local line = event .. " · " .. status
+  local shade = blocked and warning or (notice.kind == "sent" and good or accent)
+  local button_width = ui.CalcTextSize(label) + ui.CalcTextSize("Dismiss") + 46 * scale
+  local inline = ui.CalcTextSize(line) + button_width <= ui.GetContentRegionAvail()
+  if inline then tint(shade, line) else wrap_tint(shade, line) end
+  if inline then ui.SameLine() end
+  if ui.Button(label .. "##announcement") then
+    notice_view.expanded = not notice_view.expanded
+  end
+  ui.SameLine()
+  if ui.Button("Dismiss##announcement") then
+    act(plugin, "announcement_dismiss", notice.revision)
+    return
+  end
+  if not notice_view.expanded then return end
+  read_only_text("##announcement-text-" .. tostring(notice.revision), notice.message, 61 * scale)
+  if ui.Button("Copy text##announcement") then
+    local result = act(plugin, "announcement_copy", notice.revision)
+    if type(result) == "table" and type(result.message) == "string" then
+      notice_view.copy_feedback = result
+    else
+      notice_view.copy_feedback = { ok = false, message = "Could not copy automatically." }
+    end
+  end
+  if notice_view.copy_feedback and notice_view.copy_feedback.message ~= "" then
+    wrap_tint(notice_view.copy_feedback.ok and muted or warning, notice_view.copy_feedback.message)
+  end
+  ui.TextWrapped("Click the text, then press Ctrl+A and Ctrl+C to copy.")
+end
+
 local function results_text(round, scale)
   if not round then return end
   ui.TextWrapped(round.label)
@@ -538,37 +688,213 @@ local function results_text(round, scale)
   if round.leader and round.leader ~= "" then wrap_tint(accent, round.leader) end
   local summary = round.summary
   if type(summary) == "string" and summary ~= "" then
-    ui.InputTextMultiline("##summary", summary, #summary + 1, -1, 122 * scale,
-      ui.InputTextFlags.ReadOnly | ui.InputTextFlags.AutoSelectAll)
+    read_only_text("##summary", summary, 122 * scale)
   end
 end
 
-local function history(state, scale)
-  back("Round history")
-  if panel ~= "history" then return end
-  local rounds = state.history or {}
-  if #rounds == 0 then
-    ui.TextDisabled("No finished rounds yet")
-    return
+local function load_ledger(plugin, state)
+  local now = ui.GetTime()
+  local revision, session = state.ledger_revision, state.ledger_session
+  local changed = revision ~= ledger.revision or session ~= ledger.session
+  if now >= ledger.refresh_at or changed then
+    local data
+    if plugin.ledger then
+      if ledger.key then data = plugin.ledger(ledger.key) else data = plugin.ledger() end
+    end
+    if type(data) ~= "table" then data = { error = "Loot Ledger is unavailable." } end
+    if ledger.data and type(data.current_session) == "string" and data.current_session ~= "" and
+      ledger.data.current_session ~= data.current_session then
+      ledger.key, ledger.filter, ledger.award_key = nil, "", nil
+      discord = { page = 1 }
+    elseif changed then
+      discord.pages = nil
+    end
+    ledger.revision, ledger.session = revision, session
+    ledger.data, ledger.refresh_at = data, revision == nil and now + 0.5 or math.huge
   end
-  local selected = rounds[1]
-  for _, round in ipairs(rounds) do
-    if round.id == history_id then selected = round break end
+  return ledger.data
+end
+
+local function session_options(data, all_sessions)
+  local options = all_sessions and { { "", "All sessions" } } or {}
+  for _, session in ipairs(data.sessions or {}) do
+    options[#options + 1] = { session.key, session.label }
   end
+  return options
+end
+
+local function session_exists(options, key)
+  for _, option in ipairs(options) do
+    if option[1] == key then return true end
+  end
+  return false
+end
+
+local function record_picker(data)
+  local entries, chosen = {}, nil
+  for _, entry in ipairs(data.entries or {}) do
+    if ledger.filter == "" or entry.session == ledger.filter then
+      entries[#entries + 1] = entry
+      if entry.key == ledger.key then chosen = entry end
+    end
+  end
+  chosen = chosen or entries[1]
+  if not chosen then
+    ui.TextDisabled("No completed rounds for this selection.")
+    return nil
+  end
+
   ui.SetNextItemWidth(-1)
-  if ui.BeginCombo("##history-round", range_text(selected) .. " · " .. selected.label) then
-    for _, round in ipairs(rounds) do
-      local label = tostring(round.label or ""):gsub("#", "＃")
-      local result = tostring(round.leader or round.status or ""):gsub("#", "＃")
-      local entry = string.format("%s · %s · %s##history%d", range_text(round), label, result, round.id)
-      if ui.Selectable(entry, selected.id == round.id) then
-        history_id = round.id
-        selected = round
-      end
+  local preview = range_text(chosen) .. " · " .. chosen.label
+  if ui.BeginCombo("##ledger-record", preview) then
+    for _, entry in ipairs(entries) do
+      local name = entry.label:gsub("#", "＃")
+      local date = entry.date and entry.date ~= "" and (entry.date .. " · ") or ""
+      local selected = entry.key == chosen.key
+      local label = date .. range_text(entry) .. " · " .. name .. "##record" .. entry.key
+      if ui.Selectable(label, selected) then chosen = entry end
     end
     ui.EndCombo()
   end
-  results_text(selected, scale)
+  return chosen
+end
+
+local function award_editor(plugin, entry, scale)
+  local recipient = entry.recipient or ""
+  if ledger.award_key ~= entry.key then
+    ledger.award_key, ledger.award_draft, ledger.saved_recipient = entry.key, recipient, recipient
+    ledger.award_message = nil
+  elseif recipient ~= ledger.saved_recipient then
+    if ledger.award_draft == ledger.saved_recipient then ledger.award_draft = recipient end
+    ledger.saved_recipient = recipient
+  end
+
+  ui.TextWrapped("Awarded to  " .. (recipient == "" and "Unawarded" or recipient))
+  local save_width = 56 * scale
+  local clear_width = recipient ~= "" and 58 * scale or 0
+  local gap = 6 * scale
+  local available = ui.GetContentRegionAvail()
+  local clear_inline = available >= 160 * scale + save_width + clear_width + 2 * gap
+  ui.SetNextItemWidth(math.max(82 * scale, available - save_width - gap - (clear_inline and clear_width + gap or 0)))
+  ledger.award_draft = ui.InputTextWithHint("##award-recipient", "Player name", ledger.award_draft, 65)
+  ui.SameLine(0, gap)
+  local cleaned = ledger.award_draft:match("^%s*(.-)%s*$")
+  local submit = action_button("Save##award", cleaned ~= recipient, primary_colors)
+  if clear_width > 0 then
+    if clear_inline then ui.SameLine(0, gap) end
+    if ui.Button("Clear##award", clear_width) then
+      cleaned, submit = "", true
+    end
+  end
+  if submit then
+    local result = act(plugin, "award", entry.key, cleaned)
+    ledger.award_error = type(result) ~= "table" or not result.ok
+    ledger.award_message = type(result) == "table" and result.message or ""
+    if ledger.award_message == "" then
+      ledger.award_message = ledger.award_error and "Could not save the award recipient." or "Award saved."
+    end
+    if not ledger.award_error then
+      ledger.award_draft, ledger.refresh_at = cleaned, 0
+    end
+  end
+  if ledger.award_message and ledger.award_message ~= "" then
+    wrap_tint(ledger.award_error and warning or muted, ledger.award_message)
+  end
+end
+
+local ledger_views = { { "ranked", "Ranked" }, { "log", "Roll log" }, { "summary", "Result text" } }
+
+local function ledger_panel(plugin, state, scale)
+  back("Loot Ledger")
+  if panel ~= "ledger" then return end
+  local data = load_ledger(plugin, state)
+  if type(data.error) == "string" and data.error ~= "" then wrap_tint(warning, data.error) end
+  local sessions = session_options(data, true)
+  if not session_exists(sessions, ledger.filter) then ledger.filter = "" end
+  local width = ui.GetContentRegionAvail()
+  local export_width = 135 * scale
+  local inline = width >= 265 * scale
+  local filter = basic_combo("##ledger-session", ledger.filter, sessions, inline and width - export_width - 6 * scale or -1)
+  if filter ~= ledger.filter then ledger.filter, ledger.key = filter, nil end
+  if inline then ui.SameLine(0, 6 * scale) end
+  if ui.Button("Discord summary", export_width) then
+    panel = "discord"
+    discord = { session = ledger.filter ~= "" and ledger.filter or data.current_session, page = 1 }
+    return
+  end
+
+  local chosen = record_picker(data)
+  if not chosen then return end
+  if chosen.key ~= ledger.key then
+    ledger.key, ledger.refresh_at = chosen.key, 0
+    ledger.pages.ranked, ledger.pages.log = 1, 1
+    data = load_ledger(plugin, state)
+  end
+  local entry = data.selected
+  if not entry or entry.key ~= chosen.key then
+    ui.TextDisabled("Details for this round are unavailable.")
+    return
+  end
+
+  ui.Separator()
+  ui.TextWrapped(entry.label)
+  ui.TextDisabled(entry.date and entry.date ~= "" and (entry.date .. " · " .. entry.status) or entry.status)
+  wrap_tint(accent, "Roll result  " .. (entry.leader and entry.leader ~= "" and entry.leader or "No eligible rolls"))
+  award_editor(plugin, entry, scale)
+  ui.Separator()
+  ledger.view = basic_combo("##record-view", ledger.view, ledger_views, 132 * scale)
+  if ledger.view == "summary" then
+    if type(entry.summary) == "string" and entry.summary ~= "" then
+      read_only_text("##ledger-record-text", entry.summary, 116 * scale)
+    end
+  else
+    local ranked = entry.ranked or {}
+    local records = ledger.view == "ranked" and ranked or (entry.log or {})
+    roll_table(ledger.view, records, false, scale, width, ranked[1] and ranked[1].value, ledger.pages)
+  end
+end
+
+local function discord_panel(plugin, state, scale)
+  back("Discord summary", "ledger")
+  if panel ~= "discord" then return end
+  local data = load_ledger(plugin, state)
+  local options = session_options(data, false)
+  if #options == 0 then
+    ui.TextDisabled("No completed sessions available.")
+    return
+  end
+  if not session_exists(options, discord.session) then
+    discord.session = session_exists(options, data.current_session) and data.current_session or options[1][1]
+    discord.pages, discord.page = nil, 1
+  end
+  local selected = basic_combo("##discord-session", discord.session, options, -1)
+  if selected ~= discord.session then discord.session, discord.pages, discord.page = selected, nil, 1 end
+  if not discord.pages then
+    local pages = plugin.raid_summary and plugin.raid_summary(discord.session)
+    discord.error = type(pages) ~= "table"
+    discord.pages = discord.error and {} or pages
+    discord.page = math.max(1, math.min(discord.page, #discord.pages))
+  end
+  if discord.error then
+    wrap_tint(warning, "Could not load the Discord summary.")
+    return
+  elseif #discord.pages == 0 then
+    ui.TextDisabled("No completed rounds in this session.")
+    return
+  end
+  if #discord.pages > 1 then
+    if action_button("Previous##discord-page", discord.page > 1) then discord.page = discord.page - 1 end
+    ui.SameLine()
+    ui.TextDisabled(string.format("Page %d of %d", discord.page, #discord.pages))
+    ui.SameLine()
+    if action_button("Next##discord-page", discord.page < #discord.pages) then discord.page = discord.page + 1 end
+  end
+  ui.TextWrapped("Click the report, then use Select All and Copy (Ctrl+A, Ctrl+C or the Command equivalents).")
+  local text = discord.pages[discord.page]
+  if type(text) == "string" then
+    local id = string.format("##discord-text-%s-%s-%d", discord.session, ledger.revision or "", discord.page)
+    read_only_text(id, text, 174 * scale)
+  end
 end
 
 ui.window("Dicewatch", function()
@@ -624,15 +950,28 @@ ui.window("Dicewatch", function()
   local shown = ui.Begin("Dicewatch", true, ui.WindowFlags.NoTitleBar | ui.WindowFlags.AlwaysAutoResize)
   if shown then
     title_bar(plugin, state, scale, compact)
-    if panel == "new" or panel == "defaults" then
+    if panel == "new" then
       rules_form(plugin, state, scale)
-    elseif panel == "history" then
-      history(state, scale)
+    elseif panel == "settings" then
+      settings_panel(plugin, state, scale)
+    elseif panel == "ledger" then
+      ledger_panel(plugin, state, scale)
+    elseif panel == "discord" then
+      discord_panel(plugin, state, scale)
     elseif panel == "results" then
       back("Round results")
-      if panel == "results" then results_text(state.current, scale) end
+      if panel == "results" then
+        local round = state.current
+        if round and type(round.key) == "string" and round.key ~= "" then
+          if ui.Button("Record award") then open_ledger(round.key) end
+        end
+        if panel == "results" then results_text(round, scale) end
+      end
     else
       current_round(plugin, state, scale, compact)
+    end
+    if panel == "round" or panel == "ledger" or panel == "results" then
+      announcement_notice(plugin, state.announcement, scale, compact)
     end
     if type(state.message) == "string" and state.message ~= "" and
       (state.error or state.message:find("for this session", 1, true)) then

@@ -23,12 +23,32 @@ Dicewatch opens one round per exact pair of bounds. A 0–1000 round and a 200�
 - **Ranked** shows eligible rolls and tied leaders. **Roll log** shows every recorded roll and marks duplicates or replaced rolls. **Both** shows the two views together.
 - **Mini** keeps the selected item, current leader, and round controls in a compact window. Switch items without interrupting the other rounds.
 - **End** closes the selected round. **Auto end** accepts a preset or a custom number of seconds. Set the timer to zero to keep a round open until you end it.
-- **Defaults** sets the timer, winning order, and which roll counts when a player rolls more than once. Each new round starts with those defaults unless you override them in the form.
-- **History** keeps the latest 24 finished rounds for the current character session. A tie stays a tie until players resolve it. View and round defaults are saved per character.
+- **Settings → Round defaults** sets the timer, winning order, and which roll counts when a player rolls more than once. Each new round starts with those defaults unless you override them in the form.
+- **Ledger** shows the latest 200 completed rounds for this character across play sessions. View and round defaults are saved per character.
+
+## Loot Ledger
+
+Open **Ledger** and select a completed round. You can review its standings and roll log, then enter the name of whoever received the item and select **Save**. Use **Clear** to mark the item unawarded. The ledger displays the award alongside the original roll result.
+
+Choose **Discord summary**, select a play session, and copy the text from the report using your usual Select All and Copy shortcuts. Paste each page into Discord in order. The summary identifies the roll winner or tie, the recorded recipient, and items still awaiting an award.
+
+Dicewatch saves finished rounds when they close manually or by timer. Open rounds belong to the active play session. Older records are retained on disk when they fall outside the 200-round display limit.
+
+## Announcements
+
+Open **Settings → Announcements** to choose what happens when a round opens and when you save an award. Each event has its own mode and channel. Both default to **Off** and are saved per character.
+
+- **Auto-send** submits the announcement to Raid say, Group, Guild, or Say. The selected channel must be available and the server must grant Dicewatch `chat` permission.
+- **Copy** places the message on your clipboard when the event happens. If system clipboard access is unavailable, Dicewatch shows selectable text in the window.
+- **Off** leaves the event quiet.
+
+Round announcements include the item or label, exact `/random` command, winning rule, and timer when set at opening. An award announcement follows a successful recipient change on a completed round in the current session. The award text names the recipient and the original roll winner or tie.
 
 ## Permissions and data
 
-Dicewatch needs `read` to identify the active character, `commands` to register `/dicewatch` and `/itemroll`, and `ui` for the panel. The `packets` capability lets it observe the server's roll replies. It reads only the inbound zone roll reply for RoF2, validates the payload, and leaves it intact. Chat messages cannot put a roll on the board. Dicewatch makes no external requests and keeps roll results in memory.
+Dicewatch needs `read` to identify the active character, `commands` to register `/dicewatch` and `/itemroll`, and `ui` for the panel. The `packets` capability lets it observe the server's roll replies. It reads only the inbound zone roll reply for RoF2, validates the payload, and leaves it intact. Chat messages cannot put a roll on the board. Dicewatch stores finished round data and award names locally in the character's Dicewatch configuration directory. The Discord summary is plain text that you can copy and share.
+
+The `chat` capability is used for Auto-send. If the selected destination is unavailable or chat permission is restricted, the announcement remains available to copy from Dicewatch.
 
 The add-on limits the number of tracked ranges, stored rolls, and history entries. The panel reports when a round's log reaches its limit. Item-link labels and notes are treated as data.
 
