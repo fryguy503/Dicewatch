@@ -28,7 +28,7 @@ Dicewatch opens one round per exact pair of bounds. A 0–1000 round and a 200�
 
 ## Loot Ledger
 
-Open **Ledger** and select a completed round. You can review its standings and roll log, then enter the name of whoever received the item and select **Save**. Use **Clear** to mark the item unawarded. The ledger displays the award alongside the original roll result.
+Right-click a player in the standings or roll log of an ended round and choose **Award** to record them as the recipient. This works in the tracker and in **Ledger**. To enter a different recipient by name or clear an award, open the round in **Ledger** and use **Save** or **Clear**. The ledger displays the award alongside the original roll result.
 
 Choose **Discord summary**, select a play session, and copy the text from the report using your usual Select All and Copy shortcuts. Paste each page into Discord in order. The summary identifies the roll winner or tie, the recorded recipient, and items still awaiting an award.
 
@@ -38,8 +38,8 @@ Dicewatch saves finished rounds when they close manually or by timer. Open round
 
 Open **Settings → Announcements** to choose what happens when a round opens and when you save an award. Each event has its own mode and channel. Both default to **Off** and are saved per character.
 
-- **Auto-send** submits the announcement to Raid say, Group, Guild, or Say. The selected channel must be available and the server must grant Dicewatch `chat` permission.
-- **Copy** places the message on your clipboard when the event happens. If system clipboard access is unavailable, Dicewatch shows selectable text in the window.
+- **Auto-send** submits the announcement to Raid say, Group, Guild, or Say. For rounds started with a linked item, it includes the clickable item link when the tag passes validation and fits in chat. The selected channel must be available and the server must grant Dicewatch `chat` permission.
+- **Copy** places the message on your clipboard when the event happens. Copied messages use the item name because Hailstone strips game link delimiters from pasted text. If system clipboard access is unavailable, Dicewatch shows selectable text in the window.
 - **Off** leaves the event quiet.
 
 Round announcements include the item or label, exact `/random` command, winning rule, and timer when set at opening. An award announcement follows a successful recipient change on a completed round in the current session. The award text names the recipient and the original roll winner or tie.

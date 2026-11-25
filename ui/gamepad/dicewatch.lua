@@ -22,6 +22,7 @@ local ledger = { filter = "", view = "ranked", pages = { ranked = 1, log = 1 }, 
 local discord = { page = 1 }
 local settings_tab = "announce"
 local announcement_draft, announcement_feedback
+local award_feedback
 local notice_view = {}
 
 local function act(plugin, ...)
@@ -364,8 +365,34 @@ local function custom_timer(plugin, round, scale)
   end
 end
 
-local function roll_table(key, entries, show_heading, scale, width, leader_roll, pagination)
+local function save_award(plugin, receipt, player)
+  local result = act(plugin, "award", receipt.key, player)
+  local ok = type(result) == "table" and result.ok == true
+  local message = type(result) == "table" and result.message or ""
+  if type(message) ~= "string" or message == "" then
+    message = ok and "Award saved." or "Could not save the award recipient."
+  end
+  award_feedback = { key = receipt.key, ok = ok, message = message }
+  if ok then
+    ledger.refresh_at = 0
+    if ledger.award_key == receipt.key then ledger.award_draft = player end
+  end
+end
+
+local function award_status(round)
+  local recipient = round.recipient or ""
+  ui.TextWrapped("Awarded to  " .. (recipient == "" and "Unawarded" or recipient))
+  if award_feedback and award_feedback.key == round.key then
+    wrap_tint(award_feedback.ok and muted or warning, award_feedback.message)
+  end
+end
+
+local function roll_table(plugin, round, key, show_heading, scale, width, pagination)
   local ranked = key == "ranked"
+  local ranked_entries = round.ranked or {}
+  local entries = ranked and ranked_entries or (round.log or {})
+  local leader_roll = ranked_entries[1] and ranked_entries[1].value
+  local can_award = round.closed and type(round.key) == "string" and round.key ~= ""
   if show_heading then ui.Text(ranked and "Ranked" or "Roll log") end
   if #entries == 0 then
     ui.TextDisabled(ranked and "No eligible rolls yet" or "No rolls yet")
@@ -402,6 +429,11 @@ local function roll_table(key, entries, show_heading, scale, width, leader_roll,
     local leading = ranked and entry.rank == 1 or (entry.status == "Counted" and entry.value == leader_roll)
     row(ranked and tostring(entry.rank) or time_text(entry.time), entry.player, tostring(entry.value),
       entry.status or "", leading, false)
+    if can_award and ui.BeginPopupContextItem("##award-" .. round.key .. "-" .. key .. "-" .. index) then
+      ui.TextDisabled(entry.player)
+      if ui.MenuItem("Award", false, entry.player ~= round.recipient) then save_award(plugin, round, entry.player) end
+      ui.EndPopup()
+    end
   end
   if max_page > 1 then
     if action_button("Prev##" .. key, page > 1) then page = page - 1 end
@@ -463,24 +495,22 @@ local function round_views(plugin, state, round, scale)
     ui.TextDisabled(excluded_text)
   end
 
-  local ranked, log = round.ranked or {}, round.log or {}
-  local leader_roll = ranked[1] and ranked[1].value
   if view == "ranked" then
-    roll_table("ranked", ranked, false, scale, width)
+    roll_table(plugin, round, "ranked", false, scale, width)
   elseif view == "log" then
-    roll_table("log", log, false, scale, width, leader_roll)
+    roll_table(plugin, round, "log", false, scale, width)
   else
     local beside = width >= 536 * scale
     local gap = 15 * scale
     local rank_width = beside and math.floor((width - gap) * 0.40) or width
     local log_width = beside and width - gap - rank_width or width
     ui.BeginGroup()
-    roll_table("ranked", ranked, true, scale, rank_width)
+    roll_table(plugin, round, "ranked", true, scale, rank_width)
     ui.EndGroup()
     local x, y, _, bottom = ui.GetItemRect()
     if beside then ui.SameLine(0, gap) else ui.Spacing() end
     ui.BeginGroup()
-    roll_table("log", log, true, scale, log_width, leader_roll)
+    roll_table(plugin, round, "log", true, scale, log_width)
     ui.EndGroup()
     if beside then
       local _, _, _, other_bottom = ui.GetItemRect()
@@ -528,6 +558,7 @@ local function current_round(plugin, state, scale, compact)
   ui.Separator()
   round_views(plugin, state, round, scale)
   round_footer(round, scale)
+  if round.closed and round.key then award_status(round) end
 end
 
 local function back(title, destination)
@@ -763,13 +794,12 @@ local function award_editor(plugin, entry, scale)
   local recipient = entry.recipient or ""
   if ledger.award_key ~= entry.key then
     ledger.award_key, ledger.award_draft, ledger.saved_recipient = entry.key, recipient, recipient
-    ledger.award_message = nil
   elseif recipient ~= ledger.saved_recipient then
     if ledger.award_draft == ledger.saved_recipient then ledger.award_draft = recipient end
     ledger.saved_recipient = recipient
   end
 
-  ui.TextWrapped("Awarded to  " .. (recipient == "" and "Unawarded" or recipient))
+  award_status(entry)
   local save_width = 56 * scale
   local clear_width = recipient ~= "" and 58 * scale or 0
   local gap = 6 * scale
@@ -786,20 +816,7 @@ local function award_editor(plugin, entry, scale)
       cleaned, submit = "", true
     end
   end
-  if submit then
-    local result = act(plugin, "award", entry.key, cleaned)
-    ledger.award_error = type(result) ~= "table" or not result.ok
-    ledger.award_message = type(result) == "table" and result.message or ""
-    if ledger.award_message == "" then
-      ledger.award_message = ledger.award_error and "Could not save the award recipient." or "Award saved."
-    end
-    if not ledger.award_error then
-      ledger.award_draft, ledger.refresh_at = cleaned, 0
-    end
-  end
-  if ledger.award_message and ledger.award_message ~= "" then
-    wrap_tint(ledger.award_error and warning or muted, ledger.award_message)
-  end
+  if submit then save_award(plugin, entry, cleaned) end
 end
 
 local ledger_views = { { "ranked", "Ranked" }, { "log", "Roll log" }, { "summary", "Result text" } }
@@ -848,9 +865,7 @@ local function ledger_panel(plugin, state, scale)
       read_only_text("##ledger-record-text", entry.summary, 116 * scale)
     end
   else
-    local ranked = entry.ranked or {}
-    local records = ledger.view == "ranked" and ranked or (entry.log or {})
-    roll_table(ledger.view, records, false, scale, width, ranked[1] and ranked[1].value, ledger.pages)
+    roll_table(plugin, entry, ledger.view, false, scale, width, ledger.pages)
   end
 end
 

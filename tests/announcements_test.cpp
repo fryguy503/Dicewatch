@@ -35,8 +35,9 @@ void starting() {
     const auto start = Time{} + 10s;
     const auto a = tracker.start({{0, 500}, "Halo of Dawn", std::nullopt}, {}, start);
     CHECK(a.id);
-    CHECK(opening_announcement(*tracker.find(a.id)) ==
+    CHECK(opening_announcement(*tracker.find(a.id)).plain ==
         "Loot roll open for Halo of Dawn. Use /random 500. Highest roll wins.");
+    CHECK(opening_announcement(*tracker.find(a.id)).with_item_link.empty());
 
     const auto raw_tag = std::string(1, '\x12') + "001BCD" + std::string(50, '0') + "Ancient Crown" + '\x12';
     auto linked = parse_itemroll("200-1000 " + raw_tag);
@@ -44,16 +45,18 @@ void starting() {
     const auto b = tracker.start(*linked.spec, {DuplicatePolicy::First, WinnerOrder::Low, 1}, start);
     CHECK(b.id);
     const auto opening = opening_announcement(*tracker.find(b.id));
-    CHECK(opening == "Loot roll open for Ancient Crown. Use /random 200 1000. Lowest roll wins. Ends in 1 second.");
-    CHECK(opening.find(raw_tag) == std::string::npos && opening.find("01BCD") == std::string::npos);
+    CHECK(opening.plain == "Loot roll open for Ancient Crown. Use /random 200 1000. Lowest roll wins. Ends in 1 second.");
+    CHECK(opening.with_item_link == "Loot roll open for " + raw_tag +
+        ". Use /random 200 1000. Lowest roll wins. Ends in 1 second.");
+    CHECK(chat_command(AnnouncementChannel::Raid, opening.with_item_link) == "/rsay " + opening.with_item_link);
     CHECK(tracker.set_timer(b.id, 30, start + 1ms));
-    CHECK(opening_announcement(*tracker.find(b.id)).find("Ends in 30 seconds.") != std::string::npos);
+    CHECK(opening_announcement(*tracker.find(b.id)).plain.find("Ends in 30 seconds.") != std::string::npos);
     CHECK(tracker.set_timer(b.id, 0, start + 2ms));
-    CHECK(opening_announcement(*tracker.find(b.id)).find("Ends in") == std::string::npos);
+    CHECK(opening_announcement(*tracker.find(b.id)).plain.find("Ends in") == std::string::npos);
 
     Round invalid;
     invalid.spec.range = {300, 100};
-    CHECK(opening_announcement(invalid).empty());
+    CHECK(opening_announcement(invalid).plain.empty());
 }
 
 void awarding() {
@@ -67,18 +70,18 @@ void awarding() {
     CHECK(tracker.end(a.id, start + 4ms));
 
     LedgerEntry entry{{}, {}, 0, tracker.history().front(), "Mirael"};
-    CHECK(award_announcement(entry) == "Awarded Halo of Dawn to Mirael. Roll winner Trust (471).");
+    CHECK(award_announcement(entry).plain == "Awarded Halo of Dawn to Mirael. Roll winner Trust (471).");
 
     entry.round.rolls.push_back({"Rhian", 471, start + 3ms, RollStatus::Counted});
-    CHECK(award_announcement(entry) == "Awarded Halo of Dawn to Mirael. Roll tie at 471 between Trust, Rhian.");
+    CHECK(award_announcement(entry).plain == "Awarded Halo of Dawn to Mirael. Roll tie at 471 between Trust, Rhian.");
     entry.round.rolls.push_back({"Deryn", 471, start + 3ms, RollStatus::Counted});
     entry.round.rolls.push_back({"Wren", 471, start + 3ms, RollStatus::Counted});
-    CHECK(award_announcement(entry).find("between Trust, Rhian, Deryn and 1 more.") != std::string::npos);
+    CHECK(award_announcement(entry).plain.find("between Trust, Rhian, Deryn and 1 more.") != std::string::npos);
 
     entry.round.rolls.clear();
-    CHECK(award_announcement(entry) == "Awarded Halo of Dawn to Mirael. No eligible rolls.");
+    CHECK(award_announcement(entry).plain == "Awarded Halo of Dawn to Mirael. No eligible rolls.");
     entry.recipient.clear();
-    CHECK(award_announcement(entry).empty());
+    CHECK(award_announcement(entry).plain.empty());
 }
 
 void text_and_dispatch() {
@@ -109,15 +112,15 @@ void text_and_dispatch() {
     model.spec.range = {0, 500};
     model.spec.label = std::string("Name\r\n/other ${TEST}; <%t> ") + '\x12' + "tag" + '\x12' + "\xE2\x80\xAE" +
         " Cr\xC3\xA8me";
-    CHECK(opening_announcement(model).find("/random 500") != std::string::npos);
-    const auto message = opening_announcement(model);
+    const auto message = opening_announcement(model).plain;
+    CHECK(message.find("/random 500") != std::string::npos);
     CHECK(message.find("/other") == std::string::npos && message.find("Cr\xC3\xA8me") != std::string::npos);
     CHECK(message.find("${") == std::string::npos && message.find("%t") == std::string::npos);
     CHECK(chat_command(AnnouncementChannel::Raid, message));
 
     LedgerEntry award{{}, {}, 0, model, "Tr\xC3\xBAst\xE2\x80\xA8/other"};
     award.round.rolls = {{"Rhian\xC2\x85%t", 251, {}, RollStatus::Counted}};
-    CHECK(chat_command(AnnouncementChannel::Guild, award_announcement(award)));
+    CHECK(chat_command(AnnouncementChannel::Guild, award_announcement(award).plain));
 
     award.recipient = std::string(max_player_bytes, '%');
     award.round.spec.label = std::string(max_label_bytes, '/');
@@ -126,11 +129,29 @@ void text_and_dispatch() {
         award.round.rolls.push_back({std::string(1, ch) + std::string(max_player_bytes - 1, '%'),
                                     32000, {}, RollStatus::Counted});
     }
-    const auto bounded = award_announcement(award);
+    const auto bounded = award_announcement(award).plain;
     CHECK(bounded.size() <= max_announcement_bytes);
     CHECK(bounded.find("Roll tie at 32000") != std::string::npos);
     CHECK(bounded.find("and 1 more.") != std::string::npos);
     CHECK(chat_command(AnnouncementChannel::Guild, bounded));
+}
+
+void tagged_chat_validation() {
+    const auto metadata = std::string(1, item_link_delimiter) + "0000F4241" + std::string(60, '0') + "114ACFDB";
+    const auto tag = metadata + "Crown of Dawn" + item_link_delimiter;
+    const auto item = parse_item_link(tag);
+    CHECK(item && item->id == 1000001);
+    CHECK(chat_command(AnnouncementChannel::Say, "Awarded " + tag + " to Trust.") ==
+          "/say Awarded " + tag + " to Trust.");
+    CHECK(!chat_command(AnnouncementChannel::Say, "Awarded " + tag + ' ' + tag));
+    CHECK(!chat_command(AnnouncementChannel::Say, "Awarded " + tag.substr(0, tag.size() - 1)));
+    CHECK(!chat_command(AnnouncementChannel::Say, "Awarded " + tag + "\n/other"));
+    CHECK(!chat_command(AnnouncementChannel::Say, "Awarded " + std::string(max_announcement_bytes, 'X') + tag));
+    for (const char* label : {"Orb ${Target.Name}", "Orb %t", "Orb; /other", "<Orb>", "Orb\xE2\x80\x8B"}) {
+        const auto unsafe_tag = metadata + label + item_link_delimiter;
+        CHECK(parse_item_link(unsafe_tag));
+        CHECK(!chat_command(AnnouncementChannel::Say, "Awarded " + unsafe_tag + " to Trust."));
+    }
 }
 
 } // namespace
@@ -141,6 +162,7 @@ int main() {
         starting();
         awarding();
         text_and_dispatch();
+        tagged_chat_validation();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;

@@ -285,9 +285,9 @@ void dispatch(std::array<std::uint8_t, 76> payload, int stream = HAILSTONE_STREA
     CHECK(packet.opcode == opcode && packet.size == size && packet.data == data && payload == original);
 }
 
-std::string stock_item_link() {
+std::string stock_item_link(std::string_view label = "Greaves of the Vale") {
     // Tag code, five-character item ID and the remaining fixed-width hexadecimal fields.
-    return std::string(1, '\x12') + "001BCD" + std::string(50, '0') + "Greaves of the Vale" + '\x12';
+    return std::string(1, '\x12') + "001BCD" + std::string(50, '0') + std::string(label) + '\x12';
 }
 
 void commands_roll_packets_and_ui() {
@@ -584,6 +584,46 @@ void announcement_settings_and_delivery() {
     fake.shutdown();
 }
 
+void linked_announcement_delivery() {
+    TestProfile profile;
+    FakeHost fake(profile.directory);
+    fake.capabilities |= HAILSTONE_CAP_CHAT;
+    fake.initialize();
+    fake.command("/dicewatch");
+    CHECK(fake.value("action", {std::string("announcements"), std::string("send"), std::string("say"),
+                                std::string("send"), std::string("say")}).boolean("ok"));
+
+    const auto tag = stock_item_link();
+    fake.command("/itemroll", "500 " + tag);
+    CHECK(fake.sent_commands.size() == 1);
+    CHECK(fake.sent_commands.front() == "/say Loot roll open for " + tag + ". Use /random 500. Highest roll wins.");
+    CHECK(fake.model().at("announcement").string("message") ==
+          "Loot roll open for Greaves of the Vale. Use /random 500. Highest roll wins.");
+
+    dispatch(reply(0, 500, 369, "Trust"));
+    dispatch(reply(0, 500, 218, "Wren"));
+    fake.action({std::string("end"), fake.model().integer("selected")});
+    const auto key = fake.model().at("current").string("key");
+    CHECK(fake.value("action", {std::string("award"), key, std::string("Wren")}).boolean("ok"));
+    CHECK(fake.sent_commands.size() == 2);
+    CHECK(fake.sent_commands.back() == "/say Awarded " + tag + " to Wren. Roll winner Trust (369).");
+    CHECK(fake.model().at("announcement").string("message") ==
+          "Awarded Greaves of the Vale to Wren. Roll winner Trust (369).");
+
+    fake.command("/itemroll", "500 " + stock_item_link("Greaves; ${Target.Name}"));
+    CHECK(fake.sent_commands.size() == 3);
+    CHECK(fake.sent_commands.back() == "/say Loot roll open for Greaves, $ {Target.Name}. Use /random 500. Highest roll wins.");
+    CHECK(fake.model().at("announcement").string("kind") == "sent");
+
+    CHECK(fake.value("action", {std::string("announcements"), std::string("copy"), std::string("say"),
+                                std::string("off"), std::string("say")}).boolean("ok"));
+    fake.command("/itemroll", "1000 " + tag);
+    CHECK(fake.sent_commands.size() == 3);
+    CHECK(fake.model().at("announcement").string("message") ==
+          "Loot roll open for Greaves of the Vale. Use /random 1000. Highest roll wins.");
+    fake.shutdown();
+}
+
 } // namespace
 
 int main() {
@@ -593,6 +633,7 @@ int main() {
         preferences();
         loot_ledger_survives_relog();
         announcement_settings_and_delivery();
+        linked_announcement_delivery();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;

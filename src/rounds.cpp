@@ -10,7 +10,6 @@ namespace dicewatch {
 namespace {
 
 constexpr std::size_t max_command_bytes = 512;
-constexpr char item_delimiter = '\x12';
 
 std::string_view trim(std::string_view text) {
     const auto first = text.find_first_not_of(" \t");
@@ -82,30 +81,6 @@ bool is_hex(char c) {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
 }
 
-std::optional<ItemLink> parse_link(std::string_view raw) {
-    if (raw.size() < 3 || raw.size() > max_command_bytes ||
-        raw.front() != item_delimiter || raw[1] != '0' || raw.back() != item_delimiter) {
-        return std::nullopt;
-    }
-    const auto body = raw.substr(2, raw.size() - 3);
-    // Hailstone selects the wide link first when the metadata is entirely hexadecimal.
-    for (const std::size_t id_width : {8u, 5u}) {
-        const std::size_t metadata_size = id_width * 7 + 20;
-        if (body.size() < metadata_size) continue;
-        const auto metadata = body.substr(0, metadata_size);
-        if (!std::all_of(metadata.begin(), metadata.end(), is_hex)) continue;
-        const auto visible = body.substr(metadata_size);
-        const auto label = trim(visible);
-        std::uint32_t id = 0;
-        if (label.empty() || !valid_text(visible, max_label_bytes) ||
-            !parse_number(metadata.substr(0, id_width), id, 16) || id == 0) {
-            return std::nullopt;
-        }
-        return ItemLink{std::string(raw), std::string(label), id};
-    }
-    return std::nullopt;
-}
-
 bool valid_settings(Settings settings) {
     return settings.duration_seconds >= 0 && settings.duration_seconds <= max_duration_seconds &&
         (settings.order == WinnerOrder::High || settings.order == WinnerOrder::Low) &&
@@ -139,6 +114,30 @@ std::optional<Time> deadline_after(int seconds, Time now) {
 
 } // namespace
 
+std::optional<ItemLink> parse_item_link(std::string_view raw) {
+    if (raw.size() < 3 || raw.size() > max_command_bytes ||
+        raw.front() != item_link_delimiter || raw[1] != '0' || raw.back() != item_link_delimiter) {
+        return std::nullopt;
+    }
+    const auto body = raw.substr(2, raw.size() - 3);
+    // Hailstone selects the wide link first when the metadata is entirely hexadecimal.
+    for (const std::size_t id_width : {8u, 5u}) {
+        const std::size_t metadata_size = id_width * 7 + 20;
+        if (body.size() < metadata_size) continue;
+        const auto metadata = body.substr(0, metadata_size);
+        if (!std::all_of(metadata.begin(), metadata.end(), is_hex)) continue;
+        const auto visible = body.substr(metadata_size);
+        const auto label = trim(visible);
+        std::uint32_t id = 0;
+        if (label.empty() || !valid_text(visible, max_label_bytes) ||
+            !parse_number(metadata.substr(0, id_width), id, 16) || id == 0) {
+            return std::nullopt;
+        }
+        return ItemLink{std::string(raw), std::string(label), id};
+    }
+    return std::nullopt;
+}
+
 bool Range::valid() const {
     return low >= 0 && high >= low && high > 0 && high <= max_roll_value;
 }
@@ -158,11 +157,11 @@ ParseResult parse_itemroll(std::string_view args) {
     if (!range) return {std::nullopt, "Use a range within 0-32000 with a positive maximum at or above the minimum."};
 
     auto label = trim(args.substr(split));
-    if (label.find(item_delimiter) != std::string_view::npos) {
+    if (label.find(item_link_delimiter) != std::string_view::npos) {
         if (label.size() >= 2 && label.front() == '"' && label.back() == '"') {
             label = label.substr(1, label.size() - 2);
         }
-        auto item = parse_link(label);
+        auto item = parse_item_link(label);
         if (!item) return {std::nullopt, "Use one complete item link or enter a plain-text note."};
         return {RoundSpec{*range, item->label, std::move(item)}, {}};
     }
@@ -203,7 +202,7 @@ StartResult Tracker::start(RoundSpec spec, Settings settings, Time now) {
     if (!valid_settings(settings)) return {0, "Use valid round settings and a timer of 0-3600 seconds."};
 
     if (spec.item) {
-        auto item = parse_link(spec.item->raw);
+        auto item = parse_item_link(spec.item->raw);
         if (!item) return {0, "Use one complete item link or enter a plain-text note."};
         spec.label = item->label;
         spec.item = std::move(item);

@@ -85,16 +85,53 @@ const char* channel_prefix(AnnouncementChannel channel) {
     return nullptr;
 }
 
-bool safe_chat_body(std::string_view text) {
-    if (text.empty() || text.size() > max_announcement_bytes || text.front() == '/' || text.front() == ' ' ||
-        text.back() == ' ' || text.find("${") != std::string_view::npos ||
-        text.find_first_of("%;<>") != std::string_view::npos) return false;
+bool safe_chat_characters(std::string_view text) {
     while (!text.empty()) {
         const auto rune = first_rune(text);
         if (!rune.valid || unsafe_space(rune.value)) return false;
         text.remove_prefix(rune.bytes);
     }
     return true;
+}
+
+bool safe_chat_body(std::string_view text) {
+    if (text.empty() || text.size() > max_announcement_bytes || text.front() == '/' || text.front() == ' ' ||
+        text.back() == ' ' || text.find("${") != std::string_view::npos ||
+        text.find_first_of("%;<>") != std::string_view::npos) return false;
+    const auto first = text.find(item_link_delimiter);
+    if (first == std::string_view::npos) return safe_chat_characters(text);
+
+    // Only the two delimiters of a single complete item link may bypass the control-character guard.
+    const auto last = text.rfind(item_link_delimiter);
+    const auto tag = text.substr(first, last - first + 1);
+    return parse_item_link(tag).has_value() && safe_chat_characters(text.substr(0, first)) &&
+        safe_chat_characters(tag.substr(1, tag.size() - 2)) && safe_chat_characters(text.substr(last + 1));
+}
+
+AnnouncementText item_announcement(const char* prefix, const RoundSpec& spec, const std::string& suffix) {
+    return {prefix + safe_field(spec.label, max_label_bytes, "unnamed loot") + suffix,
+            spec.item ? prefix + spec.item->raw + suffix : std::string{}};
+}
+
+std::string award_result(const Round& round) {
+    const auto ranked = round.standings();
+    if (ranked.empty()) return "No eligible rolls.";
+
+    const auto other = std::find_if(ranked.begin(), ranked.end(), [](const Standing& row) { return row.rank != 1; });
+    const auto tied = static_cast<std::size_t>(other - ranked.begin());
+    const auto value = std::to_string(ranked.front().value);
+    if (tied == 1) {
+        return "Roll winner " + safe_field(ranked.front().player, max_player_bytes, "Unknown player") +
+            " (" + value + ").";
+    }
+
+    std::string result = "Roll tie at " + value + " between ";
+    for (std::size_t index = 0; index < std::min(tied, max_tie_names); ++index) {
+        if (index) result += ", ";
+        result += safe_field(ranked[index].player, max_player_bytes, "Unknown player");
+    }
+    if (tied > max_tie_names) result += " and " + std::to_string(tied - max_tie_names) + " more";
+    return result + '.';
 }
 
 } // namespace
@@ -133,44 +170,24 @@ std::optional<AnnouncementChannel> parse_announcement_channel(std::string_view t
     return std::nullopt;
 }
 
-std::string opening_announcement(const Round& round) {
+AnnouncementText opening_announcement(const Round& round) {
     const auto& range = round.spec.range;
     if (!range.valid()) return {};
-    std::string message = "Loot roll open for " + safe_field(round.spec.label, max_label_bytes, "unnamed loot") +
-        ". Use /random ";
-    if (range.low != 0) message += std::to_string(range.low) + ' ';
-    message += std::to_string(range.high);
-    message += round.settings.order == WinnerOrder::Low ? ". Lowest roll wins." : ". Highest roll wins.";
+    std::string suffix = ". Use /random ";
+    if (range.low != 0) suffix += std::to_string(range.low) + ' ';
+    suffix += std::to_string(range.high);
+    suffix += round.settings.order == WinnerOrder::Low ? ". Lowest roll wins." : ". Highest roll wins.";
     const int seconds = round.settings.duration_seconds;
     if (round.deadline && seconds > 0 && seconds <= max_duration_seconds) {
-        message += " Ends in " + std::to_string(seconds) + (seconds == 1 ? " second." : " seconds.");
+        suffix += " Ends in " + std::to_string(seconds) + (seconds == 1 ? " second." : " seconds.");
     }
-    return message;
+    return item_announcement("Loot roll open for ", round.spec, suffix);
 }
 
-std::string award_announcement(const LedgerEntry& entry) {
+AnnouncementText award_announcement(const LedgerEntry& entry) {
     const auto recipient = safe_field(entry.recipient, max_player_bytes, "");
     if (recipient.empty()) return {};
-    const auto label = safe_field(entry.round.spec.label, max_label_bytes, "unnamed loot");
-    auto message = "Awarded " + label + " to " + recipient + ". ";
-    const auto ranked = entry.round.standings();
-    if (ranked.empty()) return message + "No eligible rolls.";
-
-    const auto other = std::find_if(ranked.begin(), ranked.end(), [](const Standing& row) { return row.rank != 1; });
-    const auto tied = static_cast<std::size_t>(other - ranked.begin());
-    const auto value = std::to_string(ranked.front().value);
-    if (tied == 1) {
-        return message + "Roll winner " + safe_field(ranked.front().player, max_player_bytes, "Unknown player") +
-            " (" + value + ").";
-    }
-
-    message += "Roll tie at " + value + " between ";
-    for (std::size_t index = 0; index < std::min(tied, max_tie_names); ++index) {
-        if (index) message += ", ";
-        message += safe_field(ranked[index].player, max_player_bytes, "Unknown player");
-    }
-    if (tied > max_tie_names) message += " and " + std::to_string(tied - max_tie_names) + " more";
-    return message + '.';
+    return item_announcement("Awarded ", entry.round.spec, " to " + recipient + ". " + award_result(entry.round));
 }
 
 std::optional<std::string> chat_command(AnnouncementChannel channel, std::string_view message) {

@@ -204,12 +204,12 @@ const char* chat_unavailable(AnnouncementChannel channel) {
     return "Choose a chat channel. The message is ready to copy.";
 }
 
-void announce(AnnouncementEvent event, std::string message) {
+void announce(AnnouncementEvent event, AnnouncementText message) {
     const auto& settings = state.preferences.announcements;
     const auto mode = event == AnnouncementEvent::Opened ? settings.start_mode : settings.award_mode;
-    if (mode == AnnouncementMode::Off || message.empty()) return;
+    if (mode == AnnouncementMode::Off || message.plain.empty()) return;
 
-    AnnouncementNotice result{event, NoticeKind::Blocked, std::move(message), {}, ++state.announcement_revision};
+    AnnouncementNotice result{event, NoticeKind::Blocked, std::move(message.plain), {}, ++state.announcement_revision};
     if (mode == AnnouncementMode::Copy) {
         if (write_clipboard(result.message)) {
             result.kind = NoticeKind::Copied;
@@ -219,15 +219,18 @@ void announce(AnnouncementEvent event, std::string message) {
         }
     } else {
         const auto channel = event == AnnouncementEvent::Opened ? settings.start_channel : settings.award_channel;
-        const auto command = chat_command(channel, result.message);
         if (const auto* error = chat_unavailable(channel)) {
             result.status = error;
-        } else if (!command) {
-            result.status = "This announcement is ready for manual copy.";
         } else {
-            host->do_command(host->host, command->c_str());
-            result.kind = NoticeKind::Submitted;
-            result.status = std::string("Announcement submitted to ") + channel_title(channel) + '.';
+            auto command = chat_command(channel, message.with_item_link);
+            if (!command) command = chat_command(channel, result.message);
+            if (command) {
+                host->do_command(host->host, command->c_str());
+                result.kind = NoticeKind::Submitted;
+                result.status = std::string("Announcement submitted to ") + channel_title(channel) + '.';
+            } else {
+                result.status = "This announcement is ready for manual copy.";
+            }
         }
     }
     state.announcement = std::move(result);
@@ -529,14 +532,14 @@ void emit_announcements(Output& output) {
     output.string("award_channel", announcement_channel_name(settings.award_channel));
     output.boolean("chat_allowed", chat_allowed());
     output.boolean("clipboard_available", clipboard_available());
-    output.string("start_preview", opening_announcement(sample));
+    output.string("start_preview", opening_announcement(sample).plain);
 
     sample.settings.order = WinnerOrder::High;
     sample.deadline.reset();
     sample.ended_at = Time{};
     sample.end_reason = EndReason::Manual;
     sample.rolls = {{"Trust", 921, {}, RollStatus::Counted}, {"Wren", 803, {}, RollStatus::Counted}};
-    output.string("award_preview", award_announcement(LedgerEntry{{}, {}, 0, std::move(sample), "Wren"}));
+    output.string("award_preview", award_announcement(LedgerEntry{{}, {}, 0, std::move(sample), "Wren"}).plain);
     output.close();
 
     if (state.announcement) {

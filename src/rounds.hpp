@@ -17,6 +17,7 @@ using RoundId = std::uint64_t;
 inline constexpr int max_roll_value = 32000;
 inline constexpr int max_duration_seconds = 3600;
 inline constexpr std::size_t max_label_bytes = 160;
+inline constexpr char item_link_delimiter = '\x12';
 inline constexpr std::size_t max_player_bytes = 64;
 inline constexpr std::size_t max_rolls_per_round = 1024;
 inline constexpr std::size_t max_round_slots = 16;
@@ -92,6 +93,8 @@ struct Round {
     [[nodiscard]] std::vector<Standing> standings() const;
 };
 
+// Validates one complete, delimited Hailstone item tag.
+[[nodiscard]] std::optional<ItemLink> parse_item_link(std::string_view raw);
 // Receives the raw argument tail from Hailstone's native command handler.
 [[nodiscard]] ParseResult parse_itemroll(std::string_view args);
 
